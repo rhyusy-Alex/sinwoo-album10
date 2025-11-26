@@ -1,14 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Camera, Users, PlusSquare, User, Share2, Download, Heart, Grid, LayoutGrid, FolderPlus, Edit2, Check, X, Plus, BookHeart, LogOut, Mail, Lock } from 'lucide-react';
+import { Camera, Users, PlusSquare, User, Share2, Download, Heart, Grid, LayoutGrid, FolderPlus, Edit2, Check, X, Plus, BookHeart, LogOut, Mail, Lock, Tag, Maximize2, ArrowLeft, Calendar, Trash2, Shield, MessageCircle, CornerDownRight, ThumbsUp, Send } from 'lucide-react';
+
+// firebase.js에서 설정 가져오기
 import { db, storage, auth } from './firebase';
-import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, setDoc, getDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, setDoc, getDoc, updateDoc, deleteDoc, arrayUnion, arrayRemove, where } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+
+const formatTag = (tag) => /^\d+$/.test(tag) ? tag + "기" : tag;
+const formatDate = (timestamp) => {
+  if (!timestamp) return "";
+  const date = timestamp.toDate();
+  return `${date.getMonth()+1}월 ${date.getDate()}일 ${date.getHours()}:${String(date.getMinutes()).padStart(2,'0')}`;
+};
 
 export default function App() {
   const [user, setUser] = useState(null); 
   const [userData, setUserData] = useState(null); 
   const [loading, setLoading] = useState(true); 
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   const [activeTab, setActiveTab] = useState('home');
   const [photos, setPhotos] = useState([]);
@@ -29,10 +39,8 @@ export default function App() {
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) setUserData(docSnap.data());
         setUser(currentUser);
-      } else {
-        setUser(null);
-        setUserData(null);
-      }
+        setShowOnboarding(true);
+      } else { setUser(null); setUserData(null); }
       setLoading(false);
     });
     return () => unsubscribe();
@@ -41,17 +49,13 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "photos"), orderBy("timestamp", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setPhotos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
+    const unsubscribe = onSnapshot(q, (snapshot) => setPhotos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
     return () => unsubscribe();
   }, [user]);
 
   useEffect(() => {
     if (!user) return;
-    const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => {
-      setMembers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
+    const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => setMembers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
     return () => unsubscribe();
   }, [user]);
 
@@ -60,30 +64,64 @@ export default function App() {
   const renameCollection = (id, newName) => { setCollections(collections.map(c => c.id === id ? { ...c, name: newName } : c)); showToast("이름 변경 완료"); };
   const toggleCollectionItem = (colId, pId) => { setCollections(collections.map(c => c.id === colId ? { ...c, photoIds: c.photoIds.includes(pId) ? c.photoIds.filter(id=>id!==pId) : [...c.photoIds, pId] } : c)); };
 
+  const handleUpdateTags = async (photoId, currentTags) => {
+    const formattedCurrentTags = currentTags ? currentTags.map(formatTag) : [];
+    const newTagsString = prompt("기수를 추가/수정해주세요", formattedCurrentTags.join(", "));
+    if (newTagsString !== null) {
+      const newTags = newTagsString.split(",").map(t => { const trimmed = t.trim(); return /^\d+$/.test(trimmed) ? trimmed + "기" : trimmed; }).filter(t => t);
+      const uniqueTags = [...new Set(newTags)];
+      try { await updateDoc(doc(db, "photos", photoId), { tags: uniqueTags }); showToast("태그 업데이트 완료!"); } catch (e) { alert("실패: " + e.message); }
+    }
+  };
+
+  const handleUpdateDesc = async (photoId, currentDesc) => {
+    const newDesc = prompt("사진 설명을 수정해주세요:", currentDesc);
+    if (newDesc !== null && newDesc !== currentDesc) {
+      try { await updateDoc(doc(db, "photos", photoId), { desc: newDesc }); showToast("설명 수정 완료!"); } catch (e) { alert("실패: " + e.message); }
+    }
+  };
+
+  const handleUpdateYear = async (photoId, currentYear) => {
+    const newYear = prompt("촬영 연도를 입력해주세요 (숫자 4자리)", currentYear || "");
+    if (newYear !== null && newYear !== currentYear) {
+      if (!/^\d{4}$/.test(newYear) && newYear !== "") { alert("4자리 숫자로 입력해주세요"); return; }
+      try { await updateDoc(doc(db, "photos", photoId), { photoYear: newYear }); showToast("연도 저장 완료!"); } catch (e) { alert("실패: " + e.message); }
+    }
+  };
+
+  const handleDeletePhoto = async (photo) => {
+    if (!confirm("정말로 삭제하시겠습니까? (복구 불가)")) return;
+    setAppLoading(true);
+    try {
+      const imageRef = ref(storage, photo.url);
+      await deleteObject(imageRef).catch(e => console.log("이미지 삭제 패스:", e));
+      await deleteDoc(doc(db, "photos", photo.id));
+      showToast("삭제되었습니다.");
+    } catch (e) { alert("삭제 실패: " + e.message); }
+    setAppLoading(false);
+  };
+
+  const [editingPhoto, setEditingPhoto] = useState(null);
   const [savingPhotoId, setSavingPhotoId] = useState(null);
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-gray-100 font-bold">로딩중...</div>;
   if (!user) return <AuthScreen />;
+  if (showOnboarding) return <OnboardingScreen onStart={() => setShowOnboarding(false)} />;
 
   return (
-    // ★★★ [수정됨] 화면 꽉 차게 변경 (배경 회색 제거, 너비 제한 완화) ★★★
     <div className="w-full h-[100dvh] bg-white overflow-hidden relative flex flex-col mx-auto max-w-lg shadow-xl">
-      
       <header className="bg-white p-4 shadow-sm sticky top-0 z-10 flex justify-between items-center shrink-0">
         <h1 className="text-xl font-bold text-blue-900">신우 Photo</h1>
         <button onClick={() => alert("준비중")} className="p-2 text-gray-600"><Share2 size={20} /></button>
       </header>
-
       <main className="flex-1 overflow-hidden p-0 relative">
-        {activeTab === 'home' && <HomeTab photos={photos} collections={collections} openSaveModal={setSavingPhotoId} />}
+        {activeTab === 'home' && <HomeTab photos={photos} collections={collections} openSaveModal={setSavingPhotoId} onEditTags={setEditingPhoto} onUpdateDesc={handleUpdateDesc} onUpdateYear={handleUpdateYear} onDelete={handleDeletePhoto} currentUser={user} userData={userData} showToast={showToast} />}
         {activeTab === 'albums' && <AlbumsTab photos={photos} collections={collections} openSaveModal={setSavingPhotoId} />}
         {activeTab === 'members' && <MembersTab members={members} />}
         {activeTab === 'upload' && <UploadTab setActiveTab={setActiveTab} showToast={showToast} userData={userData} setLoading={setAppLoading} />}
         {activeTab === 'mypage' && <MyPageTab userData={userData} collections={collections} renameCollection={renameCollection} />}
       </main>
-
       {appLoading && (<div className="absolute inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center flex-col text-white"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-white mb-2"></div><p>처리중...</p></div>)}
-
       <nav className="bg-white border-t flex justify-around items-center h-16 absolute bottom-0 w-full z-30 px-1 shrink-0">
         <NavBtn icon={<Camera />} label="홈" active={activeTab === 'home'} onClick={() => setActiveTab('home')} />
         <NavBtn icon={<Users />} label="멤버" active={activeTab === 'members'} onClick={() => setActiveTab('members')} />
@@ -91,79 +129,233 @@ export default function App() {
         <NavBtn icon={<BookHeart />} label="앨범" active={activeTab === 'albums'} onClick={() => setActiveTab('albums')} />
         <NavBtn icon={<User />} label="내정보" active={activeTab === 'mypage'} onClick={() => setActiveTab('mypage')} />
       </nav>
-
       {savingPhotoId && <SaveCollectionModal photos={photos} photoId={savingPhotoId} collections={collections} toggleCollectionItem={toggleCollectionItem} closeModal={() => setSavingPhotoId(null)} createCollection={createCollection}/>}
+      {editingPhoto && <TagEditModal photo={editingPhoto} closeModal={() => setEditingPhoto(null)} showToast={showToast} />}
       {toast && <div className="absolute bottom-24 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-full shadow-lg text-sm animate-bounce z-50 whitespace-nowrap">{toast}</div>}
     </div>
   );
 }
 
-// --- 로그인/회원가입 화면 (수정됨: 로고 원본 그대로) ---
-function AuthScreen() {
-  const [isLoginMode, setIsLoginMode] = useState(true);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  const [gisu, setGisu] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+// --- [컴포넌트] 댓글 시스템 (NEW!) ---
+function CommentSection({ photoId, currentUser, userData, showToast }) {
+  const [comments, setComments] = useState([]);
+  const [newComment, setNewComment] = useState("");
+  const [replyingTo, setReplyingTo] = useState(null); // 대댓글 달 대상 ID
 
-  const handleAuth = async () => {
-    setError(""); setLoading(true);
+  // 댓글 실시간 불러오기
+  useEffect(() => {
+    const q = query(collection(db, "comments"), where("photoId", "==", photoId), orderBy("createdAt", "asc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setComments(list);
+      // 댓글 수 업데이트 (선택사항)
+      updateDoc(doc(db, "photos", photoId), { commentsCount: list.length }).catch(()=>{});
+    });
+    return () => unsubscribe();
+  }, [photoId]);
+
+  // 댓글 작성
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!newComment.trim()) return;
     try {
-      if (isLoginMode) {
-        await signInWithEmailAndPassword(auth, email, password);
-      } else {
-        if(!name || !gisu) throw new Error("이름과 기수를 입력해주세요.");
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await setDoc(doc(db, "users", userCredential.user.uid), { 
-          name, gisu, email, joinedAt: serverTimestamp() 
-        });
-      }
-    } catch (err) { 
-        // 에러 메시지 친절하게
-        if (err.code === 'auth/invalid-email') setError("이메일 형식이 올바르지 않아요. 🤔");
-        else if (err.code === 'auth/user-not-found') setError("가입된 계정이 없어요. 회원가입을 해주세요. 🙌");
-        else if (err.code === 'auth/wrong-password') setError("비밀번호가 일치하지 않아요. 🔒");
-        else if (err.code === 'auth/email-already-in-use') setError("이미 가입된 이메일입니다. 😉");
-        else if (err.code === 'auth/weak-password') setError("비밀번호는 6자리 이상이어야 해요. 🛡️");
-        else setError("로그인 실패: " + err.message);
-    }
-    setLoading(false);
+      await addDoc(collection(db, "comments"), {
+        photoId,
+        text: newComment,
+        writer: userData.name,
+        writerId: currentUser.uid,
+        writerGisu: userData.gisu,
+        createdAt: serverTimestamp(),
+        likes: [],
+        parentId: replyingTo ? replyingTo.id : null // 대댓글이면 부모 ID 저장
+      });
+      setNewComment("");
+      setReplyingTo(null);
+      showToast("댓글이 등록되었습니다.");
+    } catch (e) { alert("댓글 오류: " + e.message); }
   };
-  
-  const bgImageUrl = "https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2070&auto=format&fit=crop";
+
+  // 댓글 삭제
+  const handleDelete = async (commentId) => {
+    if (!confirm("댓글을 삭제하시겠습니까?")) return;
+    await deleteDoc(doc(db, "comments", commentId));
+  };
+
+  // 댓글 좋아요
+  const handleLike = async (comment) => {
+    const isLiked = comment.likes?.includes(currentUser.uid);
+    const commentRef = doc(db, "comments", comment.id);
+    if (isLiked) {
+      await updateDoc(commentRef, { likes: arrayRemove(currentUser.uid) });
+    } else {
+      await updateDoc(commentRef, { likes: arrayUnion(currentUser.uid) });
+    }
+  };
+
+  // 렌더링용: 부모 댓글과 자식 댓글 정리
+  const rootComments = comments.filter(c => !c.parentId);
+  const getReplies = (parentId) => comments.filter(c => c.parentId === parentId);
+
+  const CommentItem = ({ comment, isReply = false }) => (
+    <div className={`flex gap-3 mb-3 ${isReply ? 'pl-10' : ''}`}>
+      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600 shrink-0">
+        {comment.writer[0]}
+      </div>
+      <div className="flex-1">
+        <div className="bg-gray-50 p-3 rounded-xl rounded-tl-none text-sm">
+          <div className="flex justify-between items-center mb-1">
+            <span className="font-bold text-gray-800">{comment.writer} <span className="text-xs text-gray-400 font-normal">{comment.writerGisu}기</span></span>
+            <span className="text-[10px] text-gray-400">{formatDate(comment.createdAt)}</span>
+          </div>
+          <p className="text-gray-700 whitespace-pre-wrap">{comment.text}</p>
+        </div>
+        <div className="flex gap-3 mt-1 pl-2 text-xs text-gray-500">
+          <button onClick={() => handleLike(comment)} className={`flex items-center gap-1 ${comment.likes?.includes(currentUser.uid) ? 'text-red-500 font-bold' : ''}`}>
+            <ThumbsUp size={12} /> {comment.likes?.length > 0 && comment.likes.length} 좋아요
+          </button>
+          {!isReply && (
+            <button onClick={() => setReplyingTo(comment)} className="hover:text-blue-600">답글달기</button>
+          )}
+          {(comment.writerId === currentUser.uid || userData?.role === 'admin') && (
+             <button onClick={() => handleDelete(comment.id)} className="hover:text-red-600">삭제</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="h-screen flex flex-col items-center justify-center bg-gray-900 bg-cover bg-center relative before:absolute before:inset-0 before:bg-black/50" style={{ backgroundImage: `url(${bgImageUrl})` }}>
-      <div className="bg-black/70 p-8 rounded-2xl shadow-2xl w-full max-w-md text-center backdrop-blur-md border border-white/10 z-10 mx-4">
-        <div className="mb-6 flex justify-center">
-          <img src="/logo.jpg" alt="신우 로고" className="w-40 h-auto object-contain" />
+    <div className="border-t bg-white">
+      <div className="p-4 pb-20">
+        <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><MessageCircle size={18}/> 댓글 {comments.length}개</h3>
+        
+        {/* 댓글 목록 */}
+        <div className="space-y-2 mb-4">
+          {rootComments.map(root => (
+            <div key={root.id}>
+              <CommentItem comment={root} />
+              {getReplies(root.id).map(reply => (
+                <div key={reply.id} className="relative">
+                   <div className="absolute left-4 top-0 bottom-6 w-4 border-l-2 border-b-2 border-gray-100 rounded-bl-xl"></div>
+                   <CommentItem comment={reply} isReply={true} />
+                </div>
+              ))}
+            </div>
+          ))}
+          {comments.length === 0 && <p className="text-center text-gray-400 text-sm py-4">첫 번째 댓글을 남겨보세요! 👋</p>}
         </div>
-        <h1 className="text-3xl font-bold text-white mb-2 font-serif">신우 Photo</h1>
-        <p className="text-gray-300 mb-6 text-sm">{isLoginMode ? "로그인" : "회원가입"}</p>
-        <div className="space-y-3">
-          <input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none focus:border-yellow-500 transition-colors" placeholder="이메일" value={email} onChange={e=>setEmail(e.target.value)}/>
-          <input type="password" className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none focus:border-yellow-500 transition-colors" placeholder="비밀번호 (6자리 이상)" value={password} onChange={e=>setPassword(e.target.value)}/>
-          {!isLoginMode && (<><input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none focus:border-yellow-500 transition-colors" placeholder="이름 (예: 홍길동)" value={name} onChange={e=>setName(e.target.value)}/><input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none focus:border-yellow-500 transition-colors" placeholder="기수 (숫자만 입력)" type="number" value={gisu} onChange={e=>setGisu(e.target.value)}/></>)}
+      </div>
+
+      {/* 댓글 입력창 (하단 고정) */}
+      <div className="absolute bottom-0 w-full bg-white border-t p-3 z-10 flex flex-col">
+        {replyingTo && (
+          <div className="flex justify-between items-center bg-blue-50 px-3 py-2 rounded-lg mb-2 text-xs">
+            <span className="text-blue-600 font-bold">@{replyingTo.writer}님에게 답글 남기는 중...</span>
+            <button onClick={() => setReplyingTo(null)}><X size={14}/></button>
+          </div>
+        )}
+        <form onSubmit={handleSubmit} className="flex gap-2">
+          <input 
+            className="flex-1 bg-gray-100 rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-100"
+            placeholder={replyingTo ? "답글을 입력하세요..." : "따뜻한 댓글을 남겨주세요..."}
+            value={newComment}
+            onChange={e => setNewComment(e.target.value)}
+          />
+          <button type="submit" disabled={!newComment.trim()} className="bg-blue-600 text-white p-2 rounded-full disabled:bg-gray-300">
+            <Send size={18} className="ml-0.5"/>
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function GisuInput({ tags, setTags }) {
+  const [input, setInput] = useState("");
+  const addGisu = () => { if (!input) return; const newTag = /^\d+$/.test(input) ? `${input}기` : input; if (!tags.includes(newTag)) setTags([...tags, newTag]); setInput(""); };
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2"><input type="number" pattern="[0-9]*" inputMode="numeric" className="flex-1 border p-3 rounded-lg bg-gray-50 outline-none" placeholder="기수 (숫자만)" value={input} onChange={e => setInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && addGisu()}/><button onClick={addGisu} className="bg-blue-600 text-white px-4 rounded-lg font-bold shrink-0">추가</button></div>
+      <div className="flex flex-wrap gap-2 min-h-[40px] p-2 bg-gray-50 rounded-lg border border-dashed border-gray-300">{tags.length === 0 && <span className="text-gray-400 text-sm py-1">추가된 기수가 없습니다.</span>}{tags.map((tag, i) => (<span key={i} className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-1">{formatTag(tag)}<button onClick={() => setTags(tags.filter(t => t !== tag))} className="hover:text-red-500"><X size={14}/></button></span>))}</div>
+    </div>
+  );
+}
+
+function TagEditModal({ photo, closeModal, showToast }) {
+  const [tags, setTags] = useState(photo.tags || []);
+  const handleSave = async () => { try { await updateDoc(doc(db, "photos", photo.id), { tags: tags }); showToast("수정 완료!"); closeModal(); } catch (e) { alert("실패: " + e.message); } };
+  return ( <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"><div className="bg-white w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl"><div className="p-4 border-b flex justify-between items-center bg-gray-50"><h3 className="font-bold text-lg">기수 수정</h3><button onClick={closeModal}><X size={24} className="text-gray-500"/></button></div><div className="p-5 space-y-4"><div className="flex items-center gap-3 mb-2"><img src={photo.url} className="w-16 h-16 object-cover rounded-lg border" /><div><p className="font-bold text-sm truncate w-40">{photo.desc}</p></div></div><GisuInput tags={tags} setTags={setTags} /><button onClick={handleSave} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold text-lg mt-2">저장하기</button></div></div></div> );
+}
+
+function HomeTab({ photos, collections, openSaveModal, onEditTags, onUpdateDesc, onUpdateYear, onDelete, currentUser, userData, showToast }) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedPhoto, setSelectedPhoto] = useState(null);
+  const [isWideGrid, setIsWideGrid] = useState(false);
+  const [sortOption, setSortOption] = useState("upload_desc");
+  const filtered = photos.filter(p => p.desc.includes(searchTerm) || (p.tags && p.tags.some(t => t.includes(searchTerm))) || p.uploader.includes(searchTerm));
+  const sortedPhotos = [...filtered].sort((a, b) => {
+    switch (sortOption) {
+      case "upload_desc": return (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0);
+      case "upload_asc": return (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0);
+      case "year_desc": return (Number(b.photoYear) || 0) - (Number(a.photoYear) || 0);
+      case "year_asc": const ya = a.photoYear ? Number(a.photoYear) : 9999; const yb = b.photoYear ? Number(b.photoYear) : 9999; return ya - yb;
+      case "random": return 0.5 - Math.random();
+      default: return 0;
+    }
+  });
+
+  useEffect(() => { if (selectedPhoto) { const updated = photos.find(p => p.id === selectedPhoto.id); if (updated) setSelectedPhoto(updated); else setSelectedPhoto(null); } }, [photos]); 
+  const isAdmin = userData?.role === 'admin';
+
+  if (selectedPhoto) {
+    const isMyPost = currentUser && selectedPhoto.uploaderId === currentUser.uid;
+    return (
+      <div className="h-full flex flex-col bg-white">
+        <div className="p-3 border-b flex items-center justify-between sticky top-0 bg-white z-20 shadow-sm"><div className="flex items-center gap-3"><button onClick={() => setSelectedPhoto(null)} className="p-2 hover:bg-gray-100 rounded-full"><ArrowLeft size={24} className="text-gray-700"/></button><span className="font-bold text-lg truncate">사진 상세</span></div>{(isMyPost || isAdmin) && (<button onClick={() => onDelete(selectedPhoto)} className="p-2 text-red-500 hover:bg-red-50 rounded-full transition-colors"><Trash2 size={20} /></button>)}</div>
+        <div className="flex-1 overflow-y-auto relative">
+          <div className="w-full bg-black flex items-center justify-center"><img src={selectedPhoto.url} className="w-full h-auto max-h-[60vh] object-contain" /></div>
+          <div className="p-5 border-b">
+            <div className="flex justify-between items-start mb-4"><div className="flex-1 mr-2"><div className="flex items-center gap-2 mb-1"><h2 className="text-xl font-bold text-gray-900">{selectedPhoto.desc}</h2><button onClick={() => onUpdateDesc(selectedPhoto.id, selectedPhoto.desc)} className="text-gray-400 hover:text-blue-600 p-1"><Edit2 size={16}/></button></div><div className="text-sm text-gray-500 flex items-center flex-wrap gap-2"><span>By {selectedPhoto.uploader}</span><span className="text-gray-300">|</span><div className="flex items-center gap-1 group cursor-pointer" onClick={() => onUpdateYear(selectedPhoto.id, selectedPhoto.photoYear)}><Calendar size={14} className="text-gray-400"/><span className={`${selectedPhoto.photoYear ? 'text-gray-700' : 'text-gray-400 italic'}`}>{selectedPhoto.photoYear ? `${selectedPhoto.photoYear}년` : '연도 미상'}</span><Edit2 size={10} className="opacity-50 group-hover:opacity-100 text-blue-500"/></div></div></div></div>
+            <div className="mb-6"><div className="flex flex-wrap gap-2 mb-2">{selectedPhoto.tags && selectedPhoto.tags.map((tag, i) => (<span key={i} className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-sm font-medium border border-blue-100">{formatTag(tag)}</span>))}</div><button onClick={() => onEditTags(selectedPhoto)} className="text-sm text-gray-500 flex items-center gap-1 hover:text-blue-600"><Plus size={14} /> 태그(기수) 추가</button></div>
+            <div className="flex gap-3"><button onClick={() => openSaveModal(selectedPhoto.id)} className="flex-1 py-3 bg-gray-100 rounded-xl font-bold text-sm flex items-center justify-center gap-2"><Heart size={20} className={collections.some(col => col.photoIds.includes(selectedPhoto.id)) ? "fill-red-500 text-red-500" : ""} /> 앨범담기</button></div>
+          </div>
+          {/* [NEW] 댓글 섹션 추가 */}
+          <CommentSection photoId={selectedPhoto.id} currentUser={currentUser} userData={userData} showToast={showToast} />
         </div>
-        {error && <p className="text-red-400 text-sm mt-3 font-bold">⚠ {error}</p>}
-        <button onClick={handleAuth} disabled={loading} className="w-full mt-6 bg-yellow-600 hover:bg-yellow-500 text-white p-3 rounded-xl font-bold shadow-lg transition-all">{loading ? "처리중..." : (isLoginMode ? "로그인" : "가입하기")}</button>
-        <div className="mt-4 flex justify-center gap-2 text-sm"><span className="text-gray-400">{isLoginMode ? "계정이 없으신가요?" : "계정이 있으신가요?"}</span><button onClick={() => {setIsLoginMode(!isLoginMode); setError("");}} className="text-yellow-500 font-bold hover:underline">{isLoginMode ? "회원가입" : "로그인"}</button></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-white overflow-hidden">
+      <div className="p-3 border-b sticky top-0 bg-white z-10 flex flex-col gap-2">
+        <div className="relative w-full"><input className="w-full p-2 pl-9 border rounded-lg text-sm bg-gray-50 outline-none" placeholder="검색 (이름, 기수)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} /><div className="absolute left-3 top-2.5 text-gray-400">🔍</div></div>
+        <div className="flex justify-between items-center"><select className="text-xs font-bold bg-gray-50 border rounded-lg px-2 py-1.5 outline-none text-gray-600" value={sortOption} onChange={(e) => setSortOption(e.target.value)}><option value="upload_desc">최근 게시물</option><option value="upload_asc">과거 게시물</option><option value="year_desc">최근 촬영일</option><option value="year_asc">과거 촬영일</option><option value="random">랜덤 추억</option></select><button onClick={() => setIsWideGrid(!isWideGrid)} className="text-xs bg-gray-50 border rounded-lg px-3 py-1.5 text-gray-500 hover:bg-gray-100">{isWideGrid ? "크게" : "작게"}</button></div>
+      </div>
+      <div className="flex-1 overflow-y-auto bg-white pb-20">
+        <div className={`grid gap-0.5 ${isWideGrid ? 'grid-cols-4' : 'grid-cols-3'}`}>{sortedPhotos.map(p => (
+            <div key={p.id} onClick={() => setSelectedPhoto(p)} className="aspect-square cursor-pointer relative overflow-hidden group">
+              <img src={p.url} className="w-full h-full object-cover" />
+              {p.commentsCount > 0 && <div className="absolute top-1 right-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1"><MessageCircle size={10}/> {p.commentsCount}</div>}
+              {p.photoYear && <div className="absolute bottom-1 right-1 bg-black/50 text-white text-[10px] px-1.5 rounded backdrop-blur-sm">{p.photoYear}</div>}
+            </div>
+          ))}</div>
       </div>
     </div>
   );
 }
 
 function UploadTab({ setActiveTab, showToast, userData, setLoading }) {
-  const [desc, setDesc] = useState(""); const [tags, setTags] = useState(""); const [file, setFile] = useState(null); const [preview, setPreview] = useState(null);
-  const handleUpload = async () => { if (!file || !desc) return alert("사진과 설명을 입력해주세요."); try { setLoading(true); const fileRef = ref(storage, `photos/${Date.now()}_${file.name}`); await uploadBytes(fileRef, file); const url = await getDownloadURL(fileRef); const defaultTags = [`${userData.gisu}기`, userData.name]; const inputTags = tags.split(",").map(t => t.trim()).filter(t => t); const finalTags = [...new Set([...defaultTags, ...inputTags])]; await addDoc(collection(db, "photos"), { url, desc, tags: finalTags, uploader: userData.name, uploaderId: auth.currentUser.uid, timestamp: serverTimestamp() }); setLoading(false); showToast("게시 완료!"); setActiveTab('home'); } catch (e) { setLoading(false); alert(e.message); } };
-  return ( <div className="p-4 bg-white h-full overflow-y-auto pb-20"><div className="border-2 border-dashed border-gray-300 bg-gray-50 rounded-lg h-64 mb-4 flex flex-col items-center justify-center relative overflow-hidden">{preview ? <img src={preview} className="w-full h-full object-contain" /> : <div className="text-center text-gray-400"><Camera size={48} className="mx-auto mb-2 opacity-50"/><p>사진 선택</p></div>}<input type="file" accept="image/*" onChange={(e)=>{if(e.target.files[0]){setFile(e.target.files[0]);setPreview(URL.createObjectURL(e.target.files[0]))}}} className="absolute inset-0 opacity-0 cursor-pointer" /></div><input className="w-full border p-3 rounded-lg mb-4 bg-gray-50" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="설명 입력" /><input className="w-full border p-3 rounded-lg mb-6 bg-gray-50" value={tags} onChange={e=>setTags(e.target.value)} placeholder="추가 태그" /><button onClick={handleUpload} className="w-full bg-blue-600 text-white p-4 rounded-xl font-bold shadow hover:bg-blue-700">게시하기</button></div> );
+  const [desc, setDesc] = useState(""); const [photoYear, setPhotoYear] = useState(""); const [tags, setTags] = useState([]); const [file, setFile] = useState(null); const [preview, setPreview] = useState(null);
+  useEffect(() => { if (userData && tags.length === 0) setTags([`${userData.gisu}기`]); }, [userData]);
+  const handleUpload = async () => { if (!file || !desc) return alert("사진과 설명을 입력해주세요."); try { setLoading(true); const fileRef = ref(storage, `photos/${Date.now()}_${file.name}`); await uploadBytes(fileRef, file); const url = await getDownloadURL(fileRef); const defaultTags = [`${userData.gisu}기`, userData.name]; const finalTags = [...new Set([...tags, ...defaultTags])]; await addDoc(collection(db, "photos"), { url, desc, tags: finalTags, photoYear, uploader: userData.name, uploaderId: auth.currentUser.uid, timestamp: serverTimestamp(), commentsCount: 0 }); setLoading(false); showToast("게시 완료!"); setActiveTab('home'); } catch (e) { setLoading(false); alert(e.message); } };
+  return ( <div className="p-4 bg-white h-full overflow-y-auto pb-20"><div className="border-2 border-dashed border-gray-300 bg-gray-50 rounded-lg h-64 mb-4 flex flex-col items-center justify-center relative overflow-hidden">{preview ? <img src={preview} className="w-full h-full object-contain" /> : <div className="text-center text-gray-400"><Camera size={48} className="mx-auto mb-2 opacity-50"/><p>사진 선택</p></div>}<input type="file" accept="image/*" onChange={(e)=>{if(e.target.files[0]){setFile(e.target.files[0]);setPreview(URL.createObjectURL(e.target.files[0]))}}} className="absolute inset-0 opacity-0 cursor-pointer" /></div><label className="block font-bold text-gray-700 mb-1">사진 설명</label><input className="w-full border p-3 rounded-lg mb-4 bg-gray-50" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="어떤 순간인가요?" /><label className="block font-bold text-gray-700 mb-1">촬영 연도 (선택)</label><input type="number" pattern="[0-9]*" inputMode="numeric" className="w-full border p-3 rounded-lg mb-4 bg-gray-50" value={photoYear} onChange={e=>setPhotoYear(e.target.value)} placeholder="예: 1995" /><label className="block font-bold text-gray-700 mb-1">등장 기수</label><GisuInput tags={tags} setTags={setTags} /><div className="bg-yellow-50 p-3 rounded-lg mb-6 text-xs text-yellow-800 mt-2">💡 숫자로 입력하고 [추가] 버튼을 누르세요.</div><button onClick={handleUpload} className="w-full bg-blue-600 text-white p-4 rounded-xl font-bold shadow hover:bg-blue-700">게시하기</button></div> );
 }
-function MyPageTab({ userData, collections, renameCollection }) { if (!userData) return null; return ( <div className="p-4 h-full overflow-y-auto pb-20"><div className="bg-white p-6 rounded-lg shadow text-center mb-6"><div className="w-20 h-20 bg-blue-100 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl">😎</div><h2 className="text-xl font-bold">{userData.name}</h2><p className="text-gray-500">{userData.gisu}기</p><button onClick={() => confirm("로그아웃 하시겠습니까?") && signOut(auth)} className="mt-4 text-sm text-red-500 border border-red-200 px-3 py-1 rounded-full flex items-center justify-center gap-1 mx-auto hover:bg-red-50"><LogOut size={14}/> 로그아웃</button></div><div className="mb-4"><h3 className="font-bold text-lg text-gray-800">📂 나의 북마크</h3></div><div className="space-y-3">{collections.map(col => (<div key={col.id} className="bg-white p-4 rounded-lg shadow-sm border flex items-center justify-between"><div><input className="font-bold text-gray-800 border-none w-40" value={col.name} onChange={(e) => renameCollection(col.id, e.target.value)} /><p className="text-xs text-gray-500">{col.photoIds.length}장의 사진</p></div><Edit2 size={16} className="text-gray-400" /></div>))}</div></div> ); }
-function MembersTab({ members }) { const [search, setSearch] = useState(""); return ( <div className="h-full flex flex-col"><div className="bg-white p-4 sticky top-0 shadow-sm shrink-0"><input className="w-full p-2 border rounded" placeholder="이름 검색" value={search} onChange={e => setSearch(e.target.value)}/></div><ul className="bg-white divide-y flex-1 overflow-y-auto pb-20">{members.filter(m => m.name.includes(search)).map(m => (<li key={m.id} className="p-4 flex gap-3 items-center"><div className="w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">👤</div><div><p className="font-bold">{m.name} <span className="text-gray-500 text-sm">| {m.gisu}기</span></p></div></li>))}</ul></div> ); }
-function HomeTab({ photos, collections, openSaveModal }) { const [searchTerm, setSearchTerm] = useState(""); const [selectedPhoto, setSelectedPhoto] = useState(null); const [isWideGrid, setIsWideGrid] = useState(false); const filtered = photos.filter(p => p.desc.includes(searchTerm) || (p.tags && p.tags.some(t => t.includes(searchTerm))) || p.uploader.includes(searchTerm)); useEffect(() => { setSelectedPhoto(filtered.length > 0 ? filtered[0] : null); }, [searchTerm, photos]); return ( <div className="h-full flex flex-col bg-white overflow-hidden"> <div className="shrink-0 flex flex-col bg-white shadow-md z-10 relative"><div className="p-2 border-b"><div className="relative"><input className="w-full p-2 pl-3 border rounded-lg text-sm bg-gray-100 outline-none" placeholder="검색..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} /><div className="absolute right-2 top-2 text-gray-400">🔍</div></div></div>{selectedPhoto ? (<div><div className="w-full h-56 bg-black flex items-center justify-center overflow-hidden"><img src={selectedPhoto.url} className="h-full object-contain" /></div><div className="p-3 pb-4"><div className="flex justify-between items-start mb-2"><div className="truncate font-bold text-gray-800">{selectedPhoto.desc}</div><span className="text-xs bg-gray-100 px-2 py-1 rounded">By {selectedPhoto.uploader}</span></div><div className="flex gap-2"><button onClick={() => openSaveModal(selectedPhoto.id)} className={`flex-1 py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 ${collections.some(col => col.photoIds.includes(selectedPhoto.id)) ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-gray-100 text-gray-700'}`}><Heart size={18} className={collections.some(col => col.photoIds.includes(selectedPhoto.id)) ? "fill-red-500" : ""} /> 앨범담기</button><button className="px-3 py-2 bg-gray-100 rounded-lg"><Download size={18}/></button></div></div></div>) : <div className="h-56 flex items-center justify-center text-gray-400">검색 결과 없음</div>}</div><div className="flex-1 overflow-y-auto bg-white pb-20"><div className="sticky top-0 bg-white/90 p-2 flex justify-end border-b z-10"><button onClick={() => setIsWideGrid(!isWideGrid)} className="text-xs text-gray-500 flex items-center gap-1">{isWideGrid ? <LayoutGrid size={14}/> : <Grid size={14}/>} 보기변경</button></div><div className={`grid gap-0.5 ${isWideGrid ? 'grid-cols-5' : 'grid-cols-3'}`}>{filtered.map(p => (<div key={p.id} onClick={() => setSelectedPhoto(p)} className={`aspect-square cursor-pointer relative ${selectedPhoto?.id === p.id ? 'opacity-40' : ''}`}><img src={p.url} className="w-full h-full object-cover" /></div>))}</div></div></div> ); }
+
+function OnboardingScreen({ onStart }) { return ( <div className="h-screen bg-white flex flex-col items-center justify-center p-8 max-w-lg mx-auto relative"><div className="flex-1 flex flex-col justify-center items-center text-center space-y-8"><div><img src="/logo.jpg" className="w-24 h-auto mx-auto mb-4 animate-bounce" /><h1 className="text-2xl font-bold text-blue-900 mb-2">환영합니다!</h1><p className="text-gray-500">신우 동문들을 위한<br/>추억 저장소입니다.</p></div><button onClick={onStart} className="w-full bg-blue-900 text-white py-4 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 hover:bg-blue-800 mt-6">시작하기 <ArrowLeft className="rotate-180"/></button></div></div> ); }
+function AuthScreen() { const [isLoginMode, setIsLoginMode] = useState(true); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [name, setName] = useState(""); const [gisu, setGisu] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(false); const handleAuth = async () => { setError(""); setLoading(true); try { if (isLoginMode) { await signInWithEmailAndPassword(auth, email, password); } else { if(!name || !gisu) throw new Error("이름과 기수를 입력해주세요."); const userCredential = await createUserWithEmailAndPassword(auth, email, password); await setDoc(doc(db, "users", userCredential.user.uid), { name, gisu, email, role: 'user', joinedAt: serverTimestamp() }); } } catch (err) { setError("로그인 실패: " + err.message); } setLoading(false); }; const bgImageUrl = "https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2070&auto=format&fit=crop"; return ( <div className="h-screen flex flex-col items-center justify-center bg-gray-900 bg-cover bg-center relative before:absolute before:inset-0 before:bg-black/50" style={{ backgroundImage: `url(${bgImageUrl})` }}><div className="bg-black/70 p-8 rounded-2xl shadow-2xl w-full max-w-md text-center backdrop-blur-md border border-white/10 z-10 mx-4"><div className="mb-6 flex justify-center"><img src="/logo.jpg" alt="신우 로고" className="w-40 h-auto object-contain" /></div><h1 className="text-3xl font-bold text-white mb-2 font-serif">신우 Photo</h1><div className="space-y-3"><input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none" placeholder="이메일" value={email} onChange={e=>setEmail(e.target.value)}/><input type="password" className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none" placeholder="비밀번호" value={password} onChange={e=>setPassword(e.target.value)}/>{!isLoginMode && (<><input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none" placeholder="이름" value={name} onChange={e=>setName(e.target.value)}/><input className="w-full p-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 outline-none" placeholder="기수" value={gisu} onChange={e=>setGisu(e.target.value)}/></>)}</div>{error && <p className="text-red-400 mt-3">{error}</p>}<button onClick={handleAuth} disabled={loading} className="w-full mt-6 bg-yellow-600 hover:bg-yellow-500 text-white p-3 rounded-xl font-bold shadow-lg">{isLoginMode ? "로그인" : "가입하기"}</button><div className="mt-4 flex justify-center gap-2 text-sm"><span className="text-gray-400">{isLoginMode ? "계정이 없으신가요?" : "계정이 있으신가요?"}</span><button onClick={() => {setIsLoginMode(!isLoginMode); setError("");}} className="text-yellow-500 font-bold hover:underline">{isLoginMode ? "회원가입" : "로그인"}</button></div></div></div> ); }
+function MyPageTab({ userData, collections, renameCollection }) { if (!userData) return null; return ( <div className="p-4 h-full overflow-y-auto pb-20"><div className="bg-white p-6 rounded-lg shadow text-center mb-6"><div className="w-20 h-20 bg-blue-100 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl">😎</div><div className="flex justify-center items-center gap-2 mb-1"><h2 className="text-xl font-bold">{userData.name}</h2><span className={`text-xs px-2 py-0.5 rounded-full border ${userData.role === 'admin' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-green-50 text-green-600 border-green-200'}`}>{userData.role === 'admin' ? '관리자' : '정회원'}</span></div><p className="text-gray-500">{userData.gisu}기</p><button onClick={() => confirm("로그아웃 하시겠습니까?") && signOut(auth)} className="mt-4 text-sm text-red-500 border border-red-200 px-3 py-1 rounded-full flex items-center justify-center gap-1 mx-auto hover:bg-red-50"><LogOut size={14}/> 로그아웃</button></div><div className="mb-4"><h3 className="font-bold text-lg text-gray-800">📂 나의 북마크</h3></div><div className="space-y-3">{collections.map(col => (<div key={col.id} className="bg-white p-4 rounded-lg shadow-sm border flex items-center justify-between"><div><input className="font-bold text-gray-800 border-none w-40" value={col.name} onChange={(e) => renameCollection(col.id, e.target.value)} /><p className="text-xs text-gray-500">{col.photoIds.length}장의 사진</p></div><Edit2 size={16} className="text-gray-400" /></div>))}</div></div> ); }
 function AlbumsTab({ photos, collections, openSaveModal }) { const [currentAlbumId, setCurrentAlbumId] = useState(null); const [selectedPhoto, setSelectedPhoto] = useState(null); const currentAlbum = collections.find(c => c.id === currentAlbumId); const albumPhotos = currentAlbumId ? photos.filter(p => currentAlbum.photoIds.includes(p.id)) : []; if (!currentAlbumId) return ( <div className="p-4 bg-gray-50 h-full overflow-y-auto pb-20"><div className="grid grid-cols-2 gap-4">{collections.map(col => (<button key={col.id} onClick={() => { setCurrentAlbumId(col.id); setSelectedPhoto(null); }} className="bg-white p-4 rounded-xl shadow border flex flex-col items-center justify-center h-40"><FolderPlus size={32} className="text-yellow-600 mb-3" /><span className="font-bold text-gray-800">{col.name}</span><span className="text-xs text-gray-500">{col.photoIds.length}장</span></button>))}</div></div> ); return ( <div className="h-full flex flex-col bg-white overflow-hidden"><div className="bg-white p-3 sticky top-0 z-20 shadow-sm flex items-center gap-2 shrink-0"><button onClick={() => setCurrentAlbumId(null)} className="font-bold p-1">← 뒤로</button><span className="font-bold text-blue-900">📂 {currentAlbum.name}</span></div>{(selectedPhoto || albumPhotos[0]) ? (<div className="bg-white border-b shadow-md pb-2 shrink-0"><div className="w-full h-56 bg-black flex items-center justify-center overflow-hidden"><img src={(selectedPhoto || albumPhotos[0]).url} className="h-full object-contain" /></div><div className="p-3"><p className="font-bold">{(selectedPhoto || albumPhotos[0]).desc}</p></div></div>) : <div className="p-10 text-center text-gray-400">비어있음</div>}<div className="flex-1 overflow-y-auto bg-white pb-20"><div className="grid grid-cols-3 gap-0.5">{albumPhotos.map(p => (<div key={p.id} onClick={() => setSelectedPhoto(p)} className="aspect-square cursor-pointer"><img src={p.url} className="w-full h-full object-cover" /></div>))}</div></div></div> ); }
 function SaveCollectionModal({ photoId, collections, toggleCollectionItem, closeModal, createCollection }) { const [newColName, setNewColName] = useState(""); const [isCreating, setIsCreating] = useState(false); return ( <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"><div className="bg-white w-full max-w-sm rounded-xl overflow-hidden shadow-2xl"><div className="p-4 border-b flex justify-between items-center"><h3 className="font-bold">어디에 담을까요?</h3><button onClick={closeModal}><X size={20}/></button></div><div className="max-h-60 overflow-y-auto p-2">{collections.map(col => (<button key={col.id} onClick={() => toggleCollectionItem(col.id, photoId)} className={`w-full text-left p-3 rounded-lg mb-1 flex justify-between items-center ${col.photoIds.includes(photoId) ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-100'}`}><span className="font-medium">{col.name}</span>{col.photoIds.includes(photoId) && <Check size={18}/>}</button>))}</div><div className="p-3 border-t bg-gray-50">{isCreating ? (<div className="flex gap-2"><input autoFocus className="flex-1 border p-2 rounded text-sm" placeholder="새 폴더 이름" value={newColName} onChange={e => setNewColName(e.target.value)} /><button onClick={() => { createCollection(newColName); setIsCreating(false); setNewColName(""); }} className="bg-blue-600 text-white px-3 rounded text-sm font-bold">확인</button></div>) : (<button onClick={() => setIsCreating(true)} className="w-full py-2 text-blue-600 text-sm font-bold flex items-center justify-center gap-1"><Plus size={16}/> 새 폴더 만들기</button>)}</div></div></div> ); }
 function NavBtn({ icon, label, active, onClick }) { return ( <button onClick={onClick} className={`flex flex-col items-center justify-center flex-1 min-w-0 ${active ? 'text-blue-600' : 'text-gray-400'}`}>{React.cloneElement(icon, { size: 22 })}<span className="text-[10px] mt-1 font-bold whitespace-nowrap overflow-hidden text-ellipsis w-full text-center">{label}</span></button> ); }
-
+function MembersTab({ members }) { const [search, setSearch] = useState(""); return ( <div className="h-full flex flex-col"><div className="bg-white p-4 sticky top-0 shadow-sm shrink-0"><input className="w-full p-2 border rounded" placeholder="이름 검색" value={search} onChange={e => setSearch(e.target.value)}/></div><ul className="bg-white divide-y flex-1 overflow-y-auto pb-20">{members.filter(m => m.name.includes(search)).map(m => (<li key={m.id} className="p-4 flex gap-3 items-center"><div className="w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">👤</div><div><p className="font-bold">{m.name} <span className="text-gray-500 text-sm">| {m.gisu}기</span></p></div></li>))}</ul></div> ); }
