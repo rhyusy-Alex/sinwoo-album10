@@ -30,8 +30,10 @@ const formatTag = (tag) => {
 };
 const formatDate = (timestamp) => {
   if (!timestamp || !timestamp.seconds) return '';
-  const date = new Date(timestamp.seconds * 1000);
-  return `${date.getMonth() + 1}월 ${date.getDate()}일`;
+  try {
+    const date = new Date(timestamp.seconds * 1000);
+    return `${date.getMonth() + 1}월 ${date.getDate()}일`;
+  } catch (e) { return ''; }
 };
 
 // 실시간 통계 계산 (방어 코드 적용)
@@ -103,7 +105,7 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // ★ [핵심] 뒤로가기(History API) 처리
+  // --- [핵심] 뒤로가기(History API) 처리 ---
   useEffect(() => {
     const handlePopState = (event) => {
       // 물리 뒤로가기 버튼을 누르면 팝업을 닫음 (상태만 변경)
@@ -171,8 +173,8 @@ export default function App() {
 
   // --- 기능 함수들 ---
   
-  // ★ [수정] 팝업 열 때 히스토리 스택 추가
-  const handleOpenAlbum = (albumId) => {
+  // ★ 팝업 열 때 히스토리 스택 추가
+  const handleOpenAlbum = (albumId, fromTab = null) => {
     window.history.pushState({ modal: 'album' }, ''); 
     setActiveAlbumId(albumId);
   };
@@ -183,9 +185,9 @@ export default function App() {
     try { await updateDoc(doc(db, "photos", photo.id), { viewCount: increment(1) }); } catch (e) {}
   };
 
-  // ★ [수정] 닫기 버튼 누르면 뒤로가기 호출 (Popstate 유발)
+  // ★ 닫기 버튼 누르면 뒤로가기 호출 (Popstate 유발)
   const handleClosePopup = () => {
-    window.history.back();
+    window.history.back(); 
   };
 
   const createCollection = async () => {
@@ -204,15 +206,31 @@ export default function App() {
 
   const renameCollection = async (id, newName) => { try { await updateDoc(doc(db, 'albums', id), { name: newName }); showToast('이름 변경 완료'); } catch (e) { alert(e.message); } };
   
+  // ★ 앨범 담기 낙관적 업데이트
   const toggleCollectionItem = async (colId, pId) => {
     const col = collections.find((c) => c.id === colId); if (!col) return;
     const albumRef = doc(db, 'albums', colId);
     const isIncluded = (col.photoIds || []).includes(pId);
+    
+    // 1. 화면 먼저 갱신
+    const newPhotoIds = isIncluded 
+        ? col.photoIds.filter(id => id !== pId)
+        : [...(col.photoIds || []), pId];
+        
+    setCollections(prev => prev.map(c => c.id === colId ? { ...c, photoIds: newPhotoIds } : c));
+
+    // 피드백
+    if (!isIncluded) showToast(`'${col.name}'에 저장되었습니다! 💾`); 
+    else showToast(`'${col.name}'에서 제외되었습니다.`);
+
+    // 2. 서버 전송
     try {
       await updateDoc(albumRef, { photoIds: isIncluded ? arrayRemove(pId) : arrayUnion(pId) });
-      if (!isIncluded) showToast(`'${col.name}'에 저장되었습니다! 💾`); 
-      else showToast(`'${col.name}'에서 제외되었습니다.`);
-    } catch (e) { alert(e.message); }
+    } catch (e) { 
+        alert("저장 실패: " + e.message);
+        // 롤백
+        setCollections(prev => prev.map(c => c.id === colId ? { ...c, photoIds: col.photoIds } : c));
+    }
   };
 
   const deleteCollection = async (id, isDefault) => {
@@ -221,11 +239,25 @@ export default function App() {
     try { await deleteDoc(doc(db, 'albums', id)); showToast('앨범 삭제 완료'); } catch (e) { alert(e.message); }
   };
 
+  // ★ 좋아요 낙관적 업데이트
   const handlePhotoLike = async (photo) => {
     if (!user) return;
     const isLiked = (photo.likes || []).includes(user.uid);
     const photoRef = doc(db, 'photos', photo.id);
     const userRef = doc(db, 'users', user.uid);
+    
+    // 1. 화면 먼저 갱신 (가짜 데이터)
+    const newLikes = isLiked 
+      ? (photo.likes || []).filter(id => id !== user.uid) 
+      : [...(photo.likes || []), user.uid];
+    
+    // 로컬 상태 업데이트 (번쩍거림 방지)
+    setPhotos(prev => prev.map(p => p.id === photo.id ? { ...p, likes: newLikes } : p));
+    if (selectedPhoto && selectedPhoto.id === photo.id) {
+        setSelectedPhoto(prev => ({ ...prev, likes: newLikes }));
+    }
+
+    // 2. 서버 전송
     try {
       if (isLiked) {
         await updateDoc(photoRef, { likes: arrayRemove(user.uid) });
@@ -234,43 +266,78 @@ export default function App() {
         await updateDoc(photoRef, { likes: arrayUnion(user.uid) });
         await updateDoc(userRef, { givenHeartCount: increment(1) });
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { 
+        console.error(e);
+        setPhotos(prev => prev.map(p => p.id === photo.id ? { ...p, likes: photo.likes } : p));
+    }
   };
 
+  // ★ 태그 수정 (낙관적 업데이트)
   const handleUpdateTags = async (photoId, currentTags) => {
     const formatted = (currentTags || []).map(formatTag);
     const newTagsString = prompt('기수를 추가/수정해주세요', formatted.join(', '));
     if (newTagsString !== null) {
       const newTags = newTagsString.split(',').map((t) => { const trimmed = t.trim(); return /^\d+$/.test(trimmed) ? trimmed + '기' : trimmed; }).filter((t) => t);
       const uniqueTags = [...new Set(newTags)];
-      try { await updateDoc(doc(db, 'photos', photoId), { tags: uniqueTags }); showToast('태그 업데이트 완료!'); } catch (e) { alert(e.message); }
+      
+      setPhotos(prev => prev.map(p => p.id === photoId ? { ...p, tags: uniqueTags } : p));
+      if (selectedPhoto && selectedPhoto.id === photoId) {
+         setSelectedPhoto(prev => ({ ...prev, tags: uniqueTags }));
+      }
+
+      try { 
+        await updateDoc(doc(db, 'photos', photoId), { tags: uniqueTags }); 
+        showToast('태그 업데이트 완료!'); 
+      } catch (e) { alert(e.message); }
     }
   };
+
+  // ★ 설명 수정 (낙관적 업데이트)
   const handleUpdateDesc = async (photoId, currentDesc) => {
     const newDesc = prompt('사진 설명을 수정해주세요:', currentDesc);
-    if (newDesc !== null && newDesc !== currentDesc) { try { await updateDoc(doc(db, 'photos', photoId), { desc: newDesc }); showToast('수정 완료!'); } catch (e) { alert(e.message); } }
+    if (newDesc !== null && newDesc !== currentDesc) { 
+      setPhotos(prev => prev.map(p => p.id === photoId ? { ...p, desc: newDesc } : p));
+      if (selectedPhoto && selectedPhoto.id === photoId) {
+         setSelectedPhoto(prev => ({ ...prev, desc: newDesc }));
+      }
+      try { 
+        await updateDoc(doc(db, 'photos', photoId), { desc: newDesc }); 
+        showToast('수정 완료!'); 
+      } catch (e) { alert(e.message); } 
+    }
   };
+
+  // ★ 연도 수정 (낙관적 업데이트)
   const handleUpdateYear = async (photoId, currentYear) => {
     const newYear = prompt('촬영 연도(4자리) 입력', currentYear || '');
     if (newYear !== null && newYear !== currentYear) {
       if (!/^\d{4}$/.test(newYear) && newYear !== '') { alert('4자리 숫자로 입력해주세요'); return; }
-      try { await updateDoc(doc(db, 'photos', photoId), { photoYear: newYear }); showToast('연도 저장 완료!'); } catch (e) { alert(e.message); }
+      setPhotos(prev => prev.map(p => p.id === photoId ? { ...p, photoYear: newYear } : p));
+      if (selectedPhoto && selectedPhoto.id === photoId) {
+         setSelectedPhoto(prev => ({ ...prev, photoYear: newYear }));
+      }
+      try { 
+        await updateDoc(doc(db, 'photos', photoId), { photoYear: newYear }); 
+        showToast('연도 저장 완료!'); 
+      } catch (e) { alert(e.message); }
     }
   };
+
+  // ★ 삭제 안전 장치 (선닫기 후삭제)
   const handleDeletePhoto = async (photo) => {
     if (!confirm('정말로 삭제하시겠습니까?')) return;
-    setAppLoading(true);
+    
+    handleClosePopup(); // 1. 팝업부터 닫는다
+    setPhotos(prev => prev.filter(p => p.id !== photo.id)); // 2. 로컬 목록 제거
+    showToast('삭제되었습니다.');
+
     try {
       await deleteObject(ref(storage, photo.url)).catch((e) => console.log(e));
       await deleteDoc(doc(db, 'photos', photo.id));
       if (photo.uploaderId) { await updateDoc(doc(db, 'users', photo.uploaderId), { uploadCount: increment(-1) }); }
-      showToast('삭제되었습니다.');
-      handleClosePopup();
     } catch (e) { alert(e.message); }
-    setAppLoading(false);
   };
 
-  // 스와이프
   const [touchStart, setTouchStart] = useState(null);
   const [touchEnd, setTouchEnd] = useState(null);
   const onTouchStart = (e) => { setTouchEnd(null); setTouchStart(e.targetTouches[0].clientX); };
@@ -354,9 +421,7 @@ export default function App() {
               {activeTab === 'members' && <MembersTab members={members} photos={photos} onPhotoClick={handleOpenDetail} userData={currentUserRealtime} />}
               {activeTab === 'upload' && <UploadTab setActiveTab={setActiveTab} showToast={showToast} userData={currentUserRealtime} setLoading={setAppLoading} />}
               {activeTab === 'albums' && <AlbumsTab collections={collections} onOpenAlbum={handleOpenAlbum} createCollection={createCollection} deleteCollection={deleteCollection} renameCollection={renameCollection} />}
-              
-              {/* ★ MyPageTab: 앨범 목록 없음, 대시보드만! */}
-              {activeTab === 'mypage' && <MyPageTab userData={currentUserRealtime} photos={photos} members={members} collections={collections} renameCollection={renameCollection} onOpenAlbum={() => setActiveTab('albums')} onPhotoClick={handleOpenDetail} />}
+              {activeTab === 'mypage' && <MyPageTab userData={currentUserRealtime} photos={photos} members={members} collections={collections} renameCollection={renameCollection} onOpenAlbum={(id) => handleOpenAlbum(id, 'mypage')} />}
             </main>
 
             <nav className="bg-white border-t flex justify-around items-center h-16 absolute bottom-0 w-full z-30 px-1 shrink-0">
@@ -423,44 +488,26 @@ function PhotoDetailView({ photo, onClose, onDelete, onUpdateDesc, onUpdateTags,
           <span className="font-bold text-lg truncate">사진 상세</span>
         </div>
         <div className="flex gap-2">
-          {activeAlbumId && (
-             <button onClick={async () => { if (confirm("현재 앨범에서 이 사진을 뺄까요?")) { await toggleCollectionItem(activeAlbumId, photo.id); onClose(); } }} className="p-2 text-orange-500 hover:bg-orange-50 rounded-full" title="앨범에서 제외"><FolderX size={20} /></button>
-          )}
+          {activeAlbumId && ( <button onClick={async () => { if (confirm("현재 앨범에서 이 사진을 뺄까요?")) { await toggleCollectionItem(activeAlbumId, photo.id); onClose(); } }} className="p-2 text-orange-500 hover:bg-orange-50 rounded-full" title="앨범에서 제외"><FolderX size={20} /></button> )}
           {(isMyPost || isAdmin) && (<button onClick={() => onDelete(photo)} className="p-2 text-red-500 hover:bg-red-50 rounded-full"><Trash2 size={20} /></button>)}
         </div>
       </div>
-      
       <ScrollContent type="list" className="relative">
         <div className="w-full bg-black flex items-center justify-center"><img src={photo.url} className="w-full h-auto max-h-[60vh] object-contain" /></div>
         <div className="p-5 border-b">
           <div className="flex justify-between items-start mb-4">
             <div className="flex-1 mr-2">
-              <div className="flex items-center gap-2 mb-1">
-                <h2 className="text-xl font-bold text-gray-900">{photo.desc}</h2>
-                <button onClick={() => onUpdateDesc(photo.id, photo.desc)} className="text-gray-400 hover:text-blue-600 p-1"><Edit2 size={16} /></button>
-              </div>
-              <div className="text-sm text-gray-500 flex items-center flex-wrap gap-2">
-                <span>By {photo.uploader}</span><span className="text-gray-300">|</span>
-                <div className="flex items-center gap-1 group cursor-pointer" onClick={() => onUpdateYear(photo.id, photo.photoYear)}>
-                  <Calendar size={14} className="text-gray-400" />
-                  {photo.photoYear ? <span className="text-gray-700">{photo.photoYear}년</span> : <span className="text-orange-500 font-bold bg-orange-100 px-2 py-0.5 rounded-full text-xs animate-pulse">언제 찍었나요?</span>}
-                  <Edit2 size={10} className="opacity-50 group-hover:opacity-100 text-blue-500" />
-                </div>
+              <div className="flex items-center gap-2 mb-1"><h2 className="text-xl font-bold text-gray-900">{photo.desc}</h2><button onClick={() => onUpdateDesc(photo.id, photo.desc)} className="text-gray-400 hover:text-blue-600 p-1"><Edit2 size={16} /></button></div>
+              <div className="text-sm text-gray-500 flex items-center flex-wrap gap-2"><span>By {photo.uploader}</span><span className="text-gray-300">|</span>
+                <div className="flex items-center gap-1 group cursor-pointer" onClick={() => onUpdateYear(photo.id, photo.photoYear)}><Calendar size={14} className="text-gray-400" />{photo.photoYear ? <span className="text-gray-700">{photo.photoYear}년</span> : <span className="text-orange-500 font-bold bg-orange-100 px-2 py-0.5 rounded-full text-xs animate-pulse">언제 찍었나요?</span>}<Edit2 size={10} className="opacity-50 group-hover:opacity-100 text-blue-500" /></div>
                 <span className="text-gray-300">|</span><span className="flex items-center gap-1"><Eye size={14}/> {photo.viewCount || 0}</span>
               </div>
             </div>
           </div>
-          <div className="mb-6">
-            <div className="flex flex-wrap gap-2 mb-2">{photo.tags && (photo.tags||[]).map((tag, i) => (<span key={i} className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-sm font-medium border border-blue-100">{formatTag(tag)}</span>))}</div>
-            <button onClick={() => onUpdateTags(photo)} className="text-sm text-gray-500 flex items-center gap-1 hover:text-blue-600"><Plus size={14} /> 태그(기수) 추가</button>
-          </div>
+          <div className="mb-6"><div className="flex flex-wrap gap-2 mb-2">{(photo.tags||[]).map((tag, i) => (<span key={i} className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-sm font-medium border border-blue-100">{formatTag(tag)}</span>))}</div><button onClick={() => onUpdateTags(photo)} className="text-sm text-gray-500 flex items-center gap-1 hover:text-blue-600"><Plus size={14} /> 태그(기수) 추가</button></div>
           <div className="flex gap-2">
-            <button onClick={() => onLike(photo)} className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 border ${isLiked ? 'bg-red-50 border-red-100 text-red-500' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
-               <Heart size={20} className={isLiked ? "fill-red-500" : ""} /> {(photo.likes || []).length}
-            </button>
-            <button onClick={() => openSaveModal(photo.id)} className="flex-1 py-3 bg-blue-50 border border-blue-100 text-blue-700 rounded-xl font-bold text-sm flex items-center justify-center gap-2">
-               <FolderPlus size={20} /> 앨범담기
-            </button>
+            <button onClick={() => onLike(photo)} className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 border ${isLiked ? 'bg-red-50 border-red-100 text-red-500' : 'bg-gray-50 border-gray-200 text-gray-600'}`}><Heart size={20} className={isLiked ? "fill-red-500" : ""} /> {(photo.likes || []).length}</button>
+            <button onClick={() => openSaveModal(photo.id)} className="flex-1 py-3 bg-blue-50 border border-blue-100 text-blue-700 rounded-xl font-bold text-sm flex items-center justify-center gap-2"><FolderPlus size={20} /> 앨범담기</button>
           </div>
         </div>
         <CommentSection photoId={photo.id} currentUser={currentUser} userData={userData} showToast={showToast} />
@@ -490,12 +537,10 @@ function MembersTab({ members, photos, onPhotoClick, userData }) {
       const talkerScore = ((m.commentCount||0) * POINTS.WR_COMMENT) + ((m.givenHeartCount||0) * POINTS.GV_HEART);
       return { ...m, ...s, totalScore, popularityScore, talkerScore };
     });
-
     if (rankType === 'total') return membersWithScore.sort((a, b) => b.totalScore - a.totalScore);
     if (rankType === 'upload') return membersWithScore.sort((a, b) => ((b.upload||0)*POINTS.UPLOAD) - ((a.upload||0)*POINTS.UPLOAD));
     if (rankType === 'popular') return membersWithScore.sort((a, b) => b.popularityScore - a.popularityScore);
     if (rankType === 'talker') return membersWithScore.sort((a, b) => b.talkerScore - a.talkerScore);
-    
     return [...photos].sort((a, b) => {
       const scoreA = (a.viewCount || 0) + (a.commentsCount || 0) * 10;
       const scoreB = (b.viewCount || 0) + (b.commentsCount || 0) * 10;
@@ -534,10 +579,49 @@ function MembersTab({ members, photos, onPhotoClick, userData }) {
       </div>
       <ScrollContent type="list">
         {viewMode === 'ranking' ? ( rankType === 'hot_photo' ? (<div className="grid grid-cols-3 gap-0.5">{sortedList.map((p, idx) => (<div key={p.id} onClick={() => onPhotoClick(p)} className="aspect-square relative group cursor-pointer"><img src={p.url} className="w-full h-full object-cover" /><div className="absolute top-1 left-1 bg-yellow-400 text-white text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full shadow">{idx + 1}</div><div className="absolute bottom-0 w-full bg-black/50 text-white text-[10px] p-1 text-center">점수: {(p.viewCount||0) + (p.commentsCount||0)*10}</div></div>))}</div>) : (<ul className="divide-y">{sortedList.map((m, idx) => { let score = 0; if(rankType === 'total') score = m.totalScore; else if(rankType === 'upload') score = (m.upload||0) * POINTS.UPLOAD; else if(rankType === 'popular') score = m.popularityScore; else if(rankType === 'talker') score = m.talkerScore; let rank = idx + 1; if (idx > 0) { const prevM = sortedList[idx-1]; let prevScore = 0; if(rankType === 'total') prevScore = prevM.totalScore; else if(rankType === 'upload') prevScore = (prevM.upload||0) * POINTS.UPLOAD; else if(rankType === 'popular') prevScore = prevM.popularityScore; else if(rankType === 'talker') prevScore = prevM.talkerScore; if(score === prevScore) rank = idx; } return (<li key={m.id} className="p-4 flex items-center gap-4 hover:bg-gray-50"><div className={`w-8 h-8 flex items-center justify-center font-bold rounded-full ${rank === 1 ? 'bg-yellow-100 text-yellow-600' : rank <= 3 ? 'bg-gray-200' : 'text-gray-400'}`}>{rank}</div><div className="flex-1"><p className="font-bold text-gray-800">{m.name} <span className="text-xs font-normal text-gray-500">{m.gisu}기</span></p></div><div className="text-right"><span className="text-blue-600 font-bold text-lg">{score}</span><span className="text-xs text-gray-400 block">점</span></div></li>) })}</ul>) ) : (<ul className="divide-y">{filteredMembers.sort((a,b) => { if (a.role === 'admin' && b.role !== 'admin') return -1; if (a.role !== 'admin' && b.role === 'admin') return 1; if (memberSort === 'gisu') return Number(a.gisu) - Number(b.gisu); return a.name.localeCompare(b.name); }).map(m => { const s = stats[m.id] || { upload: 0, rxHeart: 0, rxComment: 0 }; return (<li key={m.id} className="p-4 flex items-center justify-between hover:bg-gray-50 transition-colors"><div className="flex items-center gap-3"><div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center font-bold">👤</div><div><div className="flex items-center gap-2"><p className="font-bold text-gray-800">{m.name}</p>{m.role === 'admin' ? <span className="bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded font-bold flex items-center gap-0.5"><Shield size={10}/> 관리자</span> : <span className="bg-gray-100 text-gray-500 text-[10px] px-1.5 py-0.5 rounded font-medium">회원</span>}</div><p className="text-xs text-gray-400 mt-0.5">{m.gisu}기</p></div></div><div className="flex items-center gap-3"><div className="flex gap-2 text-xs text-gray-500 mr-2"><span className="flex items-center gap-1"><Camera size={14} className="text-blue-400"/> {(s.upload||0) * POINTS.UPLOAD}</span><span className="flex items-center gap-1"><MessageCircle size={14} className="text-green-400"/> {(m.commentCount||0)*POINTS.WR_COMMENT}</span></div>{isAdmin && user.uid !== m.id && (<button onClick={() => handleToggleRole(m)} className="p-2 text-gray-300 hover:text-blue-600 hover:bg-blue-50 rounded-full"><UserCog size={18}/></button>)}</div></li>)})}</ul>)}</ScrollContent></PageLayout> ); }
-
 function HomeTab({ photos, collections, openSaveModal, onEditTags, onUpdateDesc, onUpdateYear, onDelete, currentUser, userData, showToast, isDetailViewRef, onPhotoClick }) { const [searchTerm, setSearchTerm] = useState(''); const [sortOption, setSortOption] = useState('upload_desc'); const filtered = photos.filter((p) => (p.desc || "").includes(searchTerm) || (p.tags && p.tags.some((t) => t.includes(searchTerm))) || (p.uploader || "").includes(searchTerm)); const sortedPhotos = [...filtered].sort((a, b) => { switch (sortOption) { case 'upload_desc': return (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0); case 'upload_asc': return (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0); case 'year_desc': return (Number(b.photoYear) || 0) - (Number(a.photoYear) || 0); case 'year_asc': { const ya = a.photoYear ? Number(a.photoYear) : 9999; const yb = b.photoYear ? Number(b.photoYear) : 9999; return ya - yb; } case 'random': return 0.5 - Math.random(); default: return 0; } }); return ( <PageLayout><div className="p-3 border-b sticky top-0 bg-white z-10 flex flex-col gap-2"><div className="relative w-full"><input className="w-full p-2 pl-9 border rounded-lg text-sm bg-gray-50 outline-none focus:ring-1 focus:ring-blue-200" placeholder="검색 (이름, 기수)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} /><div className="absolute left-3 top-2.5 text-gray-400">🔍</div></div><div className="flex justify-between items-center"><select className="text-xs font-bold bg-gray-50 border rounded-lg px-2 py-1.5 outline-none text-gray-600" value={sortOption} onChange={(e) => setSortOption(e.target.value)}><option value="upload_desc">최근 게시물</option><option value="upload_asc">과거 게시물</option><option value="year_desc">최근 촬영일</option><option value="year_asc">과거 촬영일</option><option value="random">랜덤 추억</option></select></div></div><ScrollContent type="list"><div className={`grid gap-0.5 grid-cols-3`}>{sortedPhotos.map((p) => (<div key={p.id} onClick={() => onPhotoClick(p)} className="aspect-square cursor-pointer relative overflow-hidden group"><img src={p.url} className="w-full h-full object-cover" />{p.commentsCount > 0 && <div className="absolute top-1 right-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1"><MessageCircle size={10} /> {p.commentsCount}</div>}{p.photoYear && <div className="absolute bottom-1 right-1 bg-black/50 text-white text-[10px] px-1.5 rounded backdrop-blur-sm">{p.photoYear}</div>}</div>))}</div></ScrollContent></PageLayout> ); }
 function AlbumsTab({ collections, onOpenAlbum, createCollection, deleteCollection, renameCollection }) { return ( <PageLayout><div className="p-4"><h2 className="font-bold text-lg mb-4 text-gray-700">📂 나의 앨범</h2><div className="grid grid-cols-2 gap-4">{collections.map((col) => (<div key={col.id} onClick={() => onOpenAlbum(col.id)} className="bg-gray-50 p-4 rounded-xl border flex flex-col items-center justify-center h-40 active:scale-95 transition-transform hover:bg-blue-50 relative group cursor-pointer"><FolderPlus size={32} className="text-yellow-600 mb-3" /><div onClick={(e) => e.stopPropagation()}><input className="font-bold text-gray-800 text-center bg-transparent border-none w-full focus:ring-0 p-0" value={col.name} onChange={(e) => renameCollection(col.id, e.target.value)} /></div><span className="text-xs text-gray-500">{col.photoIds.length}장</span>{!col.isDefault && (<button onClick={(e) => { e.stopPropagation(); deleteCollection(col.id, col.isDefault); }} className="absolute top-2 right-2 text-gray-300 hover:text-red-500 p-1"><Trash2 size={16} /></button>)}</div>))}<button onClick={() => createCollection()} className="border-2 border-dashed border-gray-300 p-4 rounded-xl flex flex-col items-center justify-center h-40 text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors"><Plus size={32} className="mb-2" /><span className="text-sm font-bold">새 앨범 만들기</span></button></div>{collections.length === 0 && <div className="text-center text-gray-400 py-20">아직 앨범이 없습니다.</div>}</div></PageLayout> ); }
-function MyPageTab({ userData, photos, members, collections, renameCollection, onOpenAlbum, onPhotoClick }) { if (!userData) return null; const stats = calculateRealtimeStats(photos || []); const myStats = stats[userData.id] || { upload: 0, rxHeart: 0, rxComment: 0 }; const myTotalScore = calculateUserScore(userData, stats); const myUploads = (photos || []).filter(p => p.uploaderId === userData.id).sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)); const recentPhotos = myUploads.slice(0, 5); return ( <PageLayout><ScrollContent type="form"><div className="flex flex-col items-center pt-10 pb-8 border-b border-gray-100"><div className="w-24 h-24 bg-gradient-to-br from-blue-100 to-blue-50 rounded-full mb-4 flex items-center justify-center text-4xl shadow-inner">😎</div><div className="flex flex-col items-center"><div className="flex items-center gap-2"><h2 className="text-2xl font-bold text-gray-900">{userData.name}</h2><span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${userData.role === 'admin' ? 'bg-red-50 text-red-600 border-red-100' : 'bg-blue-50 text-blue-600 border-blue-100'}`}>{userData.role === 'admin' ? '관리자' : `${userData.gisu}기`}</span></div><p className="text-sm text-gray-400 mt-1">{userData.email}</p></div><div className="mt-4 bg-yellow-50 px-5 py-2 rounded-full text-yellow-700 font-bold text-sm border border-yellow-200 shadow-sm flex items-center gap-2"><Trophy size={16}/> 나의 총점: {myTotalScore}점</div><button onClick={() => confirm("로그아웃 하시겠습니까?") && signOut(auth)} className="mt-6 text-xs text-gray-400 border border-gray-200 px-4 py-1.5 rounded-full flex items-center gap-1 hover:bg-gray-50 transition-colors"><LogOut size={12}/> 로그아웃</button></div><div className="grid grid-cols-3 gap-3 w-full mt-6 px-2"><div className="bg-blue-50 p-3 rounded-xl text-center border border-blue-100"><p className="text-xs text-blue-500 font-bold mb-1">📸 올린사진</p><p className="font-bold text-lg text-blue-700">{(myStats.upload||0) * POINTS.UPLOAD}점</p><p className="text-[10px] text-gray-400">({myStats.upload||0}장)</p></div><div className="bg-green-50 p-3 rounded-xl text-center border border-green-100"><p className="text-xs text-green-500 font-bold mb-1">💬 받은댓글</p><p className="font-bold text-lg text-green-700">{(myStats.rxComment||0) * POINTS.RX_COMMENT}점</p><p className="text-[10px] text-gray-400">({myStats.rxComment||0}개)</p></div><div className="bg-red-50 p-3 rounded-xl text-center border border-red-100"><p className="text-xs text-red-500 font-bold mb-1">❤️ 받은하트</p><p className="font-bold text-lg text-red-700">{(myStats.rxHeart||0) * POINTS.RX_HEART}점</p><p className="text-[10px] text-gray-400">({myStats.rxHeart||0}개)</p></div></div><div className="mt-8 px-1"><h3 className="font-bold text-lg text-gray-800 mb-4 flex items-center gap-2"><Camera size={20} className="text-purple-500"/> 최근 올린 추억</h3>{recentPhotos.length === 0 ? ( <p className="text-gray-400 text-sm text-center py-4">아직 올린 사진이 없습니다.</p> ) : ( <div className="flex gap-2 overflow-x-auto pb-2">{recentPhotos.map(p => { const hasNewComment = p.lastCommentAt && (Date.now() - p.lastCommentAt.toDate().getTime() < 24 * 60 * 60 * 1000); return (<div key={p.id} onClick={() => onPhotoClick(p)} className="flex-shrink-0 w-24 h-24 rounded-lg overflow-hidden relative cursor-pointer border border-gray-200"><img src={p.url} className="w-full h-full object-cover" />{hasNewComment && <div className="absolute top-1 right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white animate-pulse"></div>}</div>); })}</div> )}</div><div className="p-0 mt-8"><div className="flex justify-between items-center mb-4"><h3 className="font-bold text-lg text-gray-800 flex items-center gap-2 px-1"><BookHeart size={20} className="text-red-400"/> 나의 앨범</h3><button onClick={() => onOpenAlbum(null)} className="text-blue-500 text-xs font-bold hover:underline flex items-center gap-1">전체보기 <ChevronRight size={14}/></button></div><div className="space-y-3">{collections.slice(0, 3).map(col => (<div key={col.id} onClick={() => onOpenAlbum(col.id)} className="bg-gray-50 p-4 rounded-xl flex items-center justify-between group hover:bg-blue-50 transition-colors cursor-pointer"><div className="flex-1"><span className="font-bold text-gray-700">{col.name}</span><p className="text-xs text-gray-400 mt-1">{col.photoIds.length}장의 사진</p></div><ChevronRight size={16} className="text-gray-300 group-hover:text-blue-400" /></div>))}</div></div></ScrollContent></PageLayout> ); }
+function MyPageTab({ userData, photos, members, collections, renameCollection, onOpenAlbum, onPhotoClick }) { if (!userData) return null; const stats = calculateRealtimeStats(photos || []); const myStats = stats[userData.id] || { upload: 0, rxHeart: 0, rxComment: 0 }; const myTotalScore = calculateUserScore(userData, stats);
+  // 순위 계산 로직 추가 (상단 표시용)
+  const allUserScores = members.map(m => calculateUserScore(m, stats)).sort((a, b) => b - a);
+  const myRank = allUserScores.indexOf(myTotalScore) + 1;
+  const totalUsers = members.length;
+  const topPercent = Math.ceil((myRank / totalUsers) * 100);
+  
+  const myUploads = (photos || []).filter(p => p.uploaderId === userData.id).sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+  const recentPhotos = myUploads.slice(0, 5);
+  
+  return ( <PageLayout><ScrollContent type="form"><div className="flex flex-col items-center pt-10 pb-8 border-b border-gray-100 relative overflow-hidden">
+      {/* 배경 장식 (선택) */}
+      <div className="absolute top-0 left-0 w-full h-24 bg-gradient-to-b from-blue-50 to-white -z-10"></div>
+      <div className="w-24 h-24 bg-gradient-to-br from-blue-100 to-blue-50 rounded-full mb-4 flex items-center justify-center text-4xl shadow-inner border-4 border-white">😎</div>
+      <div className="flex flex-col items-center"><div className="flex items-center gap-2"><h2 className="text-2xl font-bold text-gray-900">{userData.name}</h2><span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${userData.role === 'admin' ? 'bg-red-50 text-red-600 border-red-100' : 'bg-blue-50 text-blue-600 border-blue-100'}`}>{userData.role === 'admin' ? '관리자' : `${userData.gisu}기`}</span></div><p className="text-sm text-gray-400 mt-1">{userData.email}</p></div>
+      
+      {/* ★ 히어로 카드 스타일 (합의된 디자인) */}
+      <div className="mt-6 w-full max-w-xs bg-gradient-to-r from-yellow-50 to-orange-50 border border-yellow-200 rounded-2xl p-4 shadow-sm flex flex-col items-center justify-center">
+          <div className="flex items-center gap-2 text-yellow-700 font-bold text-sm mb-1"><Crown size={16}/> 현재 랭킹</div>
+          <div className="text-3xl font-extrabold text-yellow-800 mb-1">{myRank}위 <span className="text-sm font-normal text-yellow-600">/ {totalUsers}명</span></div>
+          <div className="text-xs text-yellow-600 font-medium bg-white/60 px-2 py-1 rounded-full">상위 {topPercent}% • 총점 {myTotalScore}점</div>
+      </div>
+
+      <button onClick={() => confirm("로그아웃 하시겠습니까?") && signOut(auth)} className="mt-6 text-xs text-gray-400 border border-gray-200 px-4 py-1.5 rounded-full flex items-center gap-1 hover:bg-gray-50 transition-colors"><LogOut size={12}/> 로그아웃</button></div>
+      
+      {/* 6-Grid 대시보드 (B안: 성과/활동 분리) */}
+      <div className="px-4 mt-6"><h3 className="font-bold text-gray-800 mb-3 text-sm">나의 성과</h3>
+      <div className="grid grid-cols-3 gap-3">
+          <div className="bg-blue-50 p-3 rounded-xl text-center border border-blue-100"><p className="text-xs text-blue-500 font-bold mb-1">🏆 종합점수</p><p className="font-bold text-lg text-blue-900">{myTotalScore}</p></div>
+          <div className="bg-blue-50 p-3 rounded-xl text-center border border-blue-100"><p className="text-xs text-blue-500 font-bold mb-1">📸 올린사진</p><p className="font-bold text-lg text-blue-900">{(myStats.upload||0)*POINTS.UPLOAD}</p><p className="text-[10px] text-blue-400">({myStats.upload||0}장)</p></div>
+          <div className="bg-blue-50 p-3 rounded-xl text-center border border-blue-100"><p className="text-xs text-blue-500 font-bold mb-1">❤️ 받은하트</p><p className="font-bold text-lg text-blue-900">{(myStats.rxHeart||0)*POINTS.RX_HEART}</p><p className="text-[10px] text-blue-400">({myStats.rxHeart||0}개)</p></div>
+      </div>
+      <h3 className="font-bold text-gray-800 mb-3 text-sm mt-5">소통 활동</h3>
+      <div className="grid grid-cols-3 gap-3">
+          <div className="bg-gray-50 p-3 rounded-xl text-center border border-gray-200"><p className="text-xs text-gray-500 font-bold mb-1">💬 받은댓글</p><p className="font-bold text-lg text-gray-700">{(myStats.rxComment||0)*POINTS.RX_COMMENT}</p><p className="text-[10px] text-gray-400">({myStats.rxComment||0}개)</p></div>
+          <div className="bg-gray-50 p-3 rounded-xl text-center border border-gray-200"><p className="text-xs text-gray-500 font-bold mb-1">✍️ 보낸댓글</p><p className="font-bold text-lg text-gray-700">{(userData.commentCount||0)*POINTS.WR_COMMENT}</p><p className="text-[10px] text-gray-400">({userData.commentCount||0}개)</p></div>
+          <div className="bg-gray-50 p-3 rounded-xl text-center border border-gray-200"><p className="text-xs text-gray-500 font-bold mb-1">🤍 보낸하트</p><p className="font-bold text-lg text-gray-700">{(userData.givenHeartCount||0)*POINTS.GV_HEART}</p><p className="text-[10px] text-gray-400">({userData.givenHeartCount||0}개)</p></div>
+      </div></div>
+
+      <div className="mt-8 px-4"><h3 className="font-bold text-lg text-gray-800 mb-4 flex items-center gap-2"><Camera size={20} className="text-purple-500"/> 최근 올린 추억</h3>{recentPhotos.length === 0 ? ( <div className="bg-gray-50 rounded-xl p-6 text-center border border-dashed border-gray-300"><p className="text-gray-400 text-sm">아직 올린 사진이 없습니다.<br/>첫 사진을 올리고 100점을 받아보세요!</p></div> ) : ( <div className="flex gap-2 overflow-x-auto pb-2 hide-scrollbar">{recentPhotos.map(p => { const hasNewComment = p.lastCommentAt && (Date.now() - p.lastCommentAt.toDate().getTime() < 24 * 60 * 60 * 1000); return (<div key={p.id} onClick={() => onPhotoClick(p)} className="flex-shrink-0 w-24 h-24 rounded-lg overflow-hidden relative cursor-pointer border border-gray-200 shadow-sm"><img src={p.url} className="w-full h-full object-cover" />{hasNewComment && <div className="absolute top-1 right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white animate-pulse shadow-sm"></div>}</div>); })}</div> )}</div>
+      <div className="p-4 mt-4 mb-8"><button onClick={() => onOpenAlbum(null)} className="w-full py-4 bg-white border-2 border-gray-100 text-gray-600 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-gray-50 hover:border-gray-200 transition-all shadow-sm"><BookHeart size={20} className="text-red-400"/> 나의 앨범 관리하러 가기 <ChevronRight size={16} className="text-gray-400"/></button></div></ScrollContent></PageLayout> ); }
 function UploadTab({ setActiveTab, showToast, userData, setLoading }) { if (!userData) return <div className="flex h-full items-center justify-center text-gray-400">회원 정보를 불러오는 중...</div>; const [desc, setDesc] = useState(''); const [photoYear, setPhotoYear] = useState(''); const [tags, setTags] = useState([]); const [file, setFile] = useState(null); const [preview, setPreview] = useState(null); const handleUpload = async () => { if (!file || !desc) return alert('사진과 설명을 입력해주세요.'); try { setLoading(true); const fileRef = ref(storage, `photos/${Date.now()}_${file.name}`); await uploadBytes(fileRef, file); const url = await getDownloadURL(fileRef); const defaultTags = [`${userData.gisu}기`, userData.name]; const finalTags = [...new Set([...tags, ...defaultTags])]; await addDoc(collection(db, 'photos'), { url, desc, tags: finalTags, photoYear, uploader: userData.name, uploaderId: auth.currentUser.uid, timestamp: serverTimestamp(), commentsCount: 0, viewCount: 0 }); await updateDoc(doc(db, 'users', auth.currentUser.uid), { uploadCount: increment(1) }); setLoading(false); showToast('게시 완료! (+100점)'); setActiveTab('home'); } catch (e) { setLoading(false); alert(e.message); } }; return ( <PageLayout><ScrollContent type="form"><div className="border-2 border-dashed border-gray-200 bg-gray-50 rounded-2xl h-64 mb-6 flex flex-col items-center justify-center relative overflow-hidden hover:border-blue-300 transition-colors">{preview ? <img src={preview} className="w-full h-full object-contain" /> : <div className="text-center text-gray-400"><Camera size={48} className="mx-auto mb-2 opacity-30" /><p className="text-sm font-medium">사진을 선택해주세요</p></div>}<input type="file" accept="image/*" onChange={(e) => { if (e.target.files[0]) { setFile(e.target.files[0]); setPreview(URL.createObjectURL(e.target.files[0])); } }} className="absolute inset-0 opacity-0 cursor-pointer" /></div><div className="space-y-5"><div><label className="block font-bold text-gray-800 mb-2 text-sm">사진 설명</label><input className="w-full border border-gray-200 p-3.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none transition-all" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="어떤 순간인가요?" /></div><div><label className="block font-bold text-gray-800 mb-2 text-sm">촬영 연도 <span className="text-gray-400 font-normal">(선택)</span></label><input type="number" pattern="[0-9]*" inputMode="numeric" className="w-full border border-gray-200 p-3.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none transition-all" value={photoYear} onChange={(e) => setPhotoYear(e.target.value)} placeholder="예: 1995" /></div><div><label className="block font-bold text-gray-800 mb-2 text-sm">등장 기수 <span className="text-gray-400 font-normal">(함께 채워가요!)</span></label><GisuInput tags={tags} setTags={setTags} /></div></div><div className="bg-blue-50 p-4 rounded-xl mt-6 mb-8 text-xs text-blue-800 flex gap-3 items-start"><span className="text-lg">💡</span><p>기수나 촬영 연도를 몰라도 괜찮아요. 나중에 다른 회원들이 댓글이나 태그 수정으로 알려줄 거예요!</p></div><button onClick={handleUpload} className="w-full bg-blue-900 text-white p-4 rounded-xl font-bold text-lg shadow-lg hover:bg-blue-800 active:scale-95 transition-all">게시하기</button></ScrollContent></PageLayout> ); }
 function CommentSection({ photoId, currentUser, userData, showToast }) { const [comments, setComments] = useState([]); const [newComment, setNewComment] = useState(''); const [replyingTo, setReplyingTo] = useState(null); useEffect(() => { const q = query(collection(db, "comments"), where("photoId", "==", photoId)); const unsubscribe = onSnapshot(q, (snapshot) => { const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })); list.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)); setComments(list); updateDoc(doc(db, "photos", photoId), { commentsCount: list.length }).catch(() => {}); }); return () => unsubscribe(); }, [photoId]); const handleSubmit = async (e) => { e.preventDefault(); if (!newComment.trim()) return; try { await addDoc(collection(db, "comments"), { photoId, text: newComment, writer: userData.name, writerId: currentUser.uid, writerGisu: userData.gisu, createdAt: serverTimestamp(), likes: [], parentId: replyingTo ? replyingTo.id : null, }); await updateDoc(doc(db, "photos", photoId), { lastCommentAt: serverTimestamp() }); await updateDoc(doc(db, "users", currentUser.uid), { commentCount: increment(1) }); setNewComment(''); setReplyingTo(null); showToast("댓글 등록! (+10점)"); } catch (e) { alert('오류: ' + e.message); } }; const handleDelete = async (commentId) => { if (!confirm("삭제하시겠습니까?")) return; await deleteDoc(doc(db, "comments", commentId)); }; const handleLike = async (comment) => { const isLiked = comment.likes?.includes(currentUser.uid); const commentRef = doc(db, "comments", comment.id); if (isLiked) { await updateDoc(commentRef, { likes: arrayRemove(currentUser.uid) }); await updateDoc(doc(db, 'users', currentUser.uid), { givenHeartCount: increment(-1) }); } else { await updateDoc(commentRef, { likes: arrayUnion(currentUser.uid) }); await updateDoc(doc(db, 'users', currentUser.uid), { givenHeartCount: increment(1) }); } }; const rootComments = comments.filter(c => !c.parentId); const getReplies = (parentId) => comments.filter(c => c.parentId === parentId); const CommentItem = ({ comment, isReply = false }) => ( <div className={`flex gap-3 mb-3 ${isReply ? 'pl-10' : ''}`}><div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-xs font-bold text-gray-600 shrink-0 border">{comment.writer[0]}</div><div className="flex-1"><div className="bg-gray-50 p-3 rounded-xl rounded-tl-none text-sm"><div className="flex justify-between items-center mb-1"><span className="font-bold text-gray-800">{comment.writer} <span className="text-xs text-gray-400 font-normal">{comment.writerGisu}기</span></span><span className="text-[10px] text-gray-400">{formatDate(comment.createdAt)}</span></div><p className="text-gray-700 whitespace-pre-wrap">{comment.text}</p></div><div className="flex gap-3 mt-1 pl-2 text-xs text-gray-500"><button onClick={() => handleLike(comment)} className={`flex items-center gap-1 ${comment.likes?.includes(currentUser.uid) ? 'text-red-500 font-bold' : ''}`}><ThumbsUp size={12} /> {comment.likes?.length > 0 && comment.likes.length}</button>{!isReply && <button onClick={() => setReplyingTo(comment)}>답글</button>}{(comment.writerId === currentUser.uid || userData?.role === 'admin') && (<button onClick={() => handleDelete(comment.id)} className="text-red-400">삭제</button>)}</div></div></div> ); return ( <div className="border-t bg-white"><div className="p-4 pb-24"><h3 className="font-bold text-gray-800 mb-4 text-sm flex items-center gap-2"><MessageCircle size={16}/> 댓글 {comments.length}</h3><div className="space-y-2 mb-4">{rootComments.map(root => (<div key={root.id}><CommentItem comment={root} />{getReplies(root.id).map(reply => (<div key={reply.id} className="relative"><div className="absolute left-4 top-0 bottom-6 w-4 border-l-2 border-b-2 border-gray-100 rounded-bl-xl"></div><CommentItem comment={reply} isReply={true} /></div>))}</div>))}</div></div><div className="absolute bottom-0 w-full bg-white border-t p-3 z-10 flex flex-col">{replyingTo && (<div className="flex justify-between items-center bg-blue-50 px-3 py-2 rounded-lg mb-2 text-xs"><span className="text-blue-600 font-bold">@{replyingTo.writer}님에게 답글</span><button onClick={() => setReplyingTo(null)}><X size={14}/></button></div>)}<form onSubmit={handleSubmit} className="flex gap-2"><input className="flex-1 bg-gray-100 rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-100" placeholder="댓글을 입력하세요..." value={newComment} onChange={e => setNewComment(e.target.value)} /><button type="submit" disabled={!newComment.trim()} className="bg-blue-600 text-white p-2 rounded-full disabled:bg-gray-300"><Send size={18} className="ml-0.5"/></button></form></div></div> ); }
 function GisuInput({ tags, setTags }) { const [input, setInput] = useState(""); const addGisu = () => { if (!input) return; const newTag = /^\d+$/.test(input) ? `${input}기` : input; if (!tags.includes(newTag)) setTags([...tags, newTag]); setInput(""); }; return ( <div className="space-y-2"><div className="flex gap-2"><input type="number" pattern="[0-9]*" inputMode="numeric" className="flex-1 border p-3 rounded-lg bg-gray-50 outline-none focus:bg-white" placeholder="기수 (숫자만)" value={input} onChange={e => setInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && addGisu()}/><button onClick={addGisu} className="bg-blue-600 text-white px-4 rounded-lg font-bold shrink-0">추가</button></div><div className="flex flex-wrap gap-2 min-h-[40px] p-3 bg-gray-50 rounded-lg border border-dashed border-gray-200">{tags.length === 0 && <span className="text-gray-400 text-xs py-1">입력된 기수가 없습니다.</span>}{tags.map((tag, i) => (<span key={i} className="bg-white text-blue-600 border border-blue-200 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-1 shadow-sm">{formatTag(tag)}<button onClick={() => setTags(tags.filter(t => t !== tag))} className="text-gray-400 hover:text-red-500"><X size={14}/></button></span>))}</div></div> ); }
