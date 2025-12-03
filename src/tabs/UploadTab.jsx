@@ -1,208 +1,81 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import { PageLayout, ScrollContent, LoadingSpinner } from '../components/Layout';
-import { Crown, Info, Trophy, List, Shield, Camera, MessageCircle, UserCog } from 'lucide-react';
-import { db } from '../firebase';
-import { doc, updateDoc } from 'firebase/firestore';
-import { calculateRealtimeStats, calculateUserScore, POINTS } from '../utils';
+import { Camera } from 'lucide-react';
+import { storage, db, auth } from '../firebase';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { addDoc, collection, doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import GisuInput from '../components/GisuInput';
 
-export default function MembersTab({ members, photos, onPhotoClick, userData }) {
+export default function UploadTab({ setActiveTab, showToast, userData, setLoading }) {
   if (!userData) return <LoadingSpinner msg="회원 정보를 불러오는 중..." />;
 
-  const [viewMode, setViewMode] = useState('ranking');
-  const [rankType, setRankType] = useState('total');
-  const [search, setSearch] = useState("");
-  const [gisuFilter, setGisuFilter] = useState("ALL");
-  const [memberSort, setMemberSort] = useState("gisu");
-  const [showRules, setShowRules] = useState(false);
+  const [desc, setDesc] = useState('');
+  const [photoYear, setPhotoYear] = useState('');
+  const [tags, setTags] = useState([]); 
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
 
-  const gisuList = [...new Set(members.map(m => m.gisu))].sort((a, b) => a - b);
-  const isAdmin = userData.role === 'admin';
-  
-  const stats = useMemo(() => calculateRealtimeStats(photos || []), [photos]);
-
-  const getSortedRanking = () => {
-    const membersWithScore = members.map(m => {
-      const s = stats[m.id] || { upload: 0, rxHeart: 0, rxComment: 0 };
-      const totalScore = calculateUserScore(m, stats);
-      const popularityScore = (s.rxHeart * POINTS.RX_HEART) + (s.rxComment * POINTS.RX_COMMENT);
-      const talkerScore = ((m.commentCount||0) * POINTS.WR_COMMENT) + ((m.givenHeartCount||0) * POINTS.GV_HEART);
-      return { ...m, ...s, totalScore, popularityScore, talkerScore };
-    });
-
-    const sortFn = (scoreProp) => (a, b) => {
-      const scoreDiff = b[scoreProp] - a[scoreProp];
-      if (scoreDiff !== 0) return scoreDiff;
-      return a.name.localeCompare(b.name);
-    };
-
-    if (rankType === 'total') return membersWithScore.sort(sortFn('totalScore'));
-    if (rankType === 'upload') return membersWithScore.sort((a, b) => ((b.upload||0) - (a.upload||0)) || a.name.localeCompare(b.name));
-    if (rankType === 'popular') return membersWithScore.sort(sortFn('popularityScore'));
-    if (rankType === 'talker') return membersWithScore.sort(sortFn('talkerScore'));
-    
-    return [...photos].sort((a, b) => {
-      const scoreA = (a.viewCount || 0) + (a.commentsCount || 0) * 10;
-      const scoreB = (b.viewCount || 0) + (b.commentsCount || 0) * 10;
-      return scoreB - scoreA;
-    });
-  };
-
-  const filteredMembers = members.filter(m => {
-    const matchName = m.name.includes(search);
-    const matchGisu = gisuFilter === "ALL" || m.gisu === gisuFilter;
-    return matchName && matchGisu;
-  });
-
-  const handleToggleRole = async (targetMember) => {
-    if (!isAdmin) return;
-    const isTargetAdmin = targetMember.role === 'admin';
-    const message = isTargetAdmin 
-      ? `'${targetMember.name}' 님의 [관리자 권한]을 해제하시겠습니까?` 
-      : `'${targetMember.name}' 님을 [관리자]로 임명하시겠습니까?`;
-
-    if (confirm(message)) {
-      try {
-        await updateDoc(doc(db, 'users', targetMember.id), { role: isTargetAdmin ? 'user' : 'admin' });
-      } catch (e) { alert(e.message); }
+  const handleUpload = async () => {
+    if (!file || !desc) return alert('사진과 설명을 입력해주세요.');
+    try {
+      setLoading(true);
+      
+      // 1. 스토리지에 사진 업로드
+      const fileRef = ref(storage, `photos/${Date.now()}_${file.name}`);
+      await uploadBytes(fileRef, file);
+      const url = await getDownloadURL(fileRef);
+      
+      // 2. DB에 데이터 저장 (순수 입력 태그만 저장)
+      await addDoc(collection(db, 'photos'), {
+        url, 
+        desc, 
+        tags: tags,
+        photoYear,
+        uploader: userData.name,
+        uploaderId: auth.currentUser.uid,
+        timestamp: serverTimestamp(),
+        commentsCount: 0,
+        viewCount: 0
+      });
+      
+      // 3. 카운트 증가
+      await updateDoc(doc(db, 'users', auth.currentUser.uid), { uploadCount: increment(1) });
+      
+      setLoading(false);
+      if(showToast) showToast('게시 완료! (+100점)');
+      setActiveTab('home');
+    } catch (e) {
+      setLoading(false);
+      alert(e.message);
     }
   };
 
-  const sortedList = getSortedRanking().slice(0, 30);
-  const getBtnStyle = (type) => `px-3 py-1 text-xs rounded-full border whitespace-nowrap ${rankType === type ? 'bg-blue-50 border-blue-200 text-blue-700 font-bold' : 'bg-white border-gray-200 text-gray-500'}`;
-
-  // 점수 표시용 컴포넌트 (너비 고정)
-  const ScoreDisplay = ({ score }) => (
-    <div className="text-right w-[3.5rem]"> 
-      <span className="text-blue-600 font-bold text-lg">{score}</span>
-      <span className="text-xs text-gray-400 block">점</span>
-    </div>
-  );
-
   return (
     <PageLayout>
-      <div className="p-3 sticky top-0 bg-white z-10 border-b">
-        <div className="flex items-center justify-center mb-2 relative">
-          <h2 className="font-bold text-lg text-yellow-600 flex items-center gap-1"><Crown size={20}/> 명예의 전당</h2>
-          <button onClick={() => setShowRules(!showRules)} className="absolute right-0 text-gray-400 hover:text-blue-500"><Info size={18}/></button>
+      <ScrollContent type="form">
+        <div className="border-2 border-dashed border-gray-200 bg-gray-50 rounded-2xl h-64 mb-6 flex flex-col items-center justify-center relative overflow-hidden hover:border-blue-300 transition-colors">
+          {preview ? <img src={preview} className="w-full h-full object-contain" alt="preview" /> : <div className="text-center text-gray-400"><Camera size={48} className="mx-auto mb-2 opacity-30" /><p className="text-sm font-medium">사진을 선택해주세요</p></div>}
+          <input type="file" accept="image/*" onChange={(e) => { if (e.target.files[0]) { setFile(e.target.files[0]); setPreview(URL.createObjectURL(e.target.files[0])); } }} className="absolute inset-0 opacity-0 cursor-pointer" />
         </div>
-        {showRules && (<div className="bg-blue-50 p-3 rounded-lg text-xs text-gray-700 mb-3 shadow-inner"><strong>[ 🏆 점수 기준 ]</strong><br/>📸 업로드: <b>+{POINTS.UPLOAD}</b> / 🏷️ 태그기여: <b>+{POINTS.TAG_EDIT}</b><br/>💬 받은댓글: <b>+{POINTS.RX_COMMENT}</b> / ✍️ 쓴댓글: <b>+{POINTS.WR_COMMENT}</b><br/>❤️ 받은하트: <b>+{POINTS.RX_HEART}</b> / 🤍 누른하트: <b>+{POINTS.GV_HEART}</b></div>)}
-        <div className="flex bg-gray-100 p-1 rounded-xl mb-3">
-          <button onClick={() => setViewMode('ranking')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-2 ${viewMode === 'ranking' ? 'bg-white text-blue-900 shadow' : 'text-gray-400'}`}><Trophy size={16} /> 랭킹</button>
-          <button onClick={() => setViewMode('list')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-2 ${viewMode === 'list' ? 'bg-white text-blue-900 shadow' : 'text-gray-400'}`}><List size={16} /> 전체 회원</button>
+        <div className="space-y-5">
+          <div>
+            <label className="block font-bold text-gray-800 mb-2 text-sm">사진 설명</label>
+            <input className="w-full border border-gray-200 p-3.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none transition-all" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="어떤 순간인가요?" />
+          </div>
+          <div>
+            <label className="block font-bold text-gray-800 mb-2 text-sm">촬영 연도 <span className="text-gray-400 font-normal">(선택)</span></label>
+            <input type="number" pattern="[0-9]*" inputMode="numeric" className="w-full border border-gray-200 p-3.5 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none transition-all" value={photoYear} onChange={(e) => setPhotoYear(e.target.value)} placeholder="예: 1995" />
+          </div>
+          <div>
+            <label className="block font-bold text-gray-800 mb-2 text-sm">등장 기수 <span className="text-gray-400 font-normal">(함께 채워가요!)</span></label>
+            <GisuInput tags={tags} setTags={setTags} />
+          </div>
         </div>
-        {viewMode === 'ranking' && (<div className="flex gap-2 overflow-x-auto pb-1 hide-scrollbar"><button onClick={() => setRankType('total')} className={getBtnStyle('total')}>🏆 종합</button><button onClick={() => setRankType('upload')} className={getBtnStyle('upload')}>📸 사진왕</button><button onClick={() => setRankType('popular')} className={getBtnStyle('popular')}>❤️ 인기왕</button><button onClick={() => setRankType('talker')} className={getBtnStyle('talker')}>✍️ 소통왕</button><button onClick={() => setRankType('hot_photo')} className={getBtnStyle('hot_photo')}>🔥 인기사진</button></div>)}
-        {viewMode === 'list' && (<div className="flex gap-2"><input className="flex-1 p-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-100" placeholder="이름 검색" value={search} onChange={e => setSearch(e.target.value)}/><select className="p-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none font-bold text-gray-600" value={gisuFilter} onChange={e => setGisuFilter(e.target.value)}><option value="ALL">전체 기수</option>{gisuList.map(g => <option key={g} value={g}>{g}기</option>)}</select></div>)}
-      </div>
-      <ScrollContent type="list">
-        {viewMode === 'ranking' ? (
-          rankType === 'hot_photo' ? (
-            <div className="grid grid-cols-3 gap-0.5">
-              {sortedList.map((p, idx) => (
-                <div key={p.id} onClick={() => onPhotoClick(p)} className="aspect-square relative group cursor-pointer">
-                  <img src={p.url} className="w-full h-full object-cover" loading="lazy" />
-                  <div className="absolute top-1 left-1 bg-yellow-400 text-white text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full shadow">{idx + 1}</div>
-                  <div className="absolute bottom-0 w-full bg-black/50 text-white text-[10px] p-1 text-center">점수: {(p.viewCount||0) + (p.commentsCount||0)*10}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <ul className="divide-y">
-              {sortedList.map((m, idx) => {
-                let score = 0;
-                if(rankType === 'total') score = m.totalScore;
-                else if(rankType === 'upload') score = (m.upload||0) * POINTS.UPLOAD;
-                else if(rankType === 'popular') score = m.popularityScore;
-                else if(rankType === 'talker') score = m.talkerScore;
-                
-                let scoreKey = 'totalScore';
-                if(rankType === 'upload') scoreKey = 'upload';
-                else if(rankType === 'popular') scoreKey = 'popularityScore';
-                else if(rankType === 'talker') scoreKey = 'talkerScore';
-
-                const myVal = (rankType === 'upload') ? (m.upload || 0) : m[scoreKey];
-                const firstIndex = sortedList.findIndex(item => {
-                    if(rankType === 'upload') return (item.upload || 0) === myVal;
-                    return item[scoreKey] === myVal;
-                });
-                const rank = firstIndex + 1;
-
-                return (
-                  <li key={m.id} className="p-4 flex items-center gap-4 hover:bg-gray-50">
-                    <div className={`w-8 h-8 flex items-center justify-center font-bold rounded-full ${rank === 1 ? 'bg-yellow-100 text-yellow-600' : rank <= 3 ? 'bg-gray-200' : 'text-gray-400'}`}>{rank}</div>
-                    
-                    {/* 이름 및 뱃지 영역 */}
-                    <div className="flex-1 flex items-center flex-wrap gap-1">
-                      <p className="font-bold text-gray-800">{m.name} <span className="text-xs font-normal text-gray-500">{m.gisu}기</span></p>
-                      {m.role === 'admin' && (
-                        <span className="text-[10px] font-bold text-white bg-red-400 px-1.5 py-0.5 rounded-md shadow-sm">
-                          관리자
-                        </span>
-                      )}
-                    </div>
-                    
-                    {/* 점수 및 버튼 영역 */}
-                    <div className="flex items-center gap-2">
-                      <ScoreDisplay score={score} />
-                      
-                      {isAdmin && (
-                        userData.id !== m.id ? (
-                          // 버튼 (색상 통일: 회색 -> 호버시 파랑)
-                          <button onClick={() => handleToggleRole(m)} className="p-2 rounded-full text-gray-300 hover:text-blue-600 hover:bg-blue-50">
-                            <UserCog size={18}/>
-                          </button>
-                        ) : (
-                          // 본인은 투명 박스로 자리만 차지
-                          <div className="w-[34px] h-[34px]"></div>
-                        )
-                      )}
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )
-        ) : (
-          <ul className="divide-y">
-            {filteredMembers.sort((a,b) => {
-              if (a.role === 'admin' && b.role !== 'admin') return -1;
-              if (a.role !== 'admin' && b.role === 'admin') return 1;
-              if (memberSort === 'gisu') return Number(a.gisu) - Number(b.gisu);
-              return a.name.localeCompare(b.name);
-            }).map(m => {
-              const s = stats[m.id] || { upload: 0, rxHeart: 0, rxComment: 0 };
-              return (
-                <li key={m.id} className="p-4 flex items-center justify-between hover:bg-gray-50 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center font-bold">👤</div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="font-bold text-gray-800">{m.name}</p>
-                        {m.role === 'admin' ? <span className="bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded font-bold flex items-center gap-0.5"><Shield size={10}/> 관리자</span> : <span className="bg-gray-100 text-gray-500 text-[10px] px-1.5 py-0.5 rounded font-medium">회원</span>}
-                      </div>
-                      <p className="text-xs text-gray-400 mt-0.5">{m.gisu}기</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex gap-2 text-xs text-gray-500 mr-2">
-                      <span className="flex items-center gap-1"><Camera size={14} className="text-blue-400"/> {(s.upload||0) * POINTS.UPLOAD}</span>
-                      <span className="flex items-center gap-1"><MessageCircle size={14} className="text-green-400"/> {(m.commentCount||0)*POINTS.WR_COMMENT}</span>
-                    </div>
-                    {/* 일반 리스트 버튼도 색상 통일 */}
-                    {isAdmin && (
-                        userData.id !== m.id ? (
-                          <button onClick={() => handleToggleRole(m)} className="p-2 rounded-full text-gray-300 hover:text-blue-600 hover:bg-blue-50">
-                            <UserCog size={18}/>
-                          </button>
-                        ) : (
-                          <div className="w-[34px] h-[34px]"></div>
-                        )
-                    )}
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        )}
+        <div className="bg-blue-50 p-4 rounded-xl mt-6 mb-8 text-xs text-blue-800 flex gap-3 items-start">
+          <span className="text-lg">💡</span>
+          <p>기수나 촬영 연도를 몰라도 괜찮아요. 나중에 다른 회원들이 댓글이나 태그 수정으로 알려줄 거예요!</p>
+        </div>
+        <button onClick={handleUpload} className="w-full bg-blue-900 text-white p-4 rounded-xl font-bold text-lg shadow-lg hover:bg-blue-800 active:scale-95 transition-all">게시하기</button>
       </ScrollContent>
     </PageLayout>
   );
