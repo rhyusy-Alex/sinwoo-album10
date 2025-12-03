@@ -11,7 +11,6 @@ import OnboardingScreen from './components/OnboardingScreen';
 import PhotoDetailView from './components/PhotoDetailView';
 import AlbumDetailOverlay from './components/AlbumDetailOverlay';
 import SaveCollectionModal from './components/SaveCollectionModal';
-// ★ [추가] 멤버 프로필 뷰 임포트
 import MemberProfileView from './components/MemberProfileView';
 
 import HomeTab from './tabs/HomeTab';
@@ -34,8 +33,6 @@ export default function App() {
 
   const [activeAlbumId, setActiveAlbumId] = useState(null);
   const [selectedPhoto, setSelectedPhoto] = useState(null);
-  
-  // ★ [추가] 선택된 회원 상태
   const [selectedMember, setSelectedMember] = useState(null);
   
   const [savingPhotoId, setSavingPhotoId] = useState(null);
@@ -48,6 +45,20 @@ export default function App() {
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
   };
+
+  // --- ★ [핵심 수정] 실시간 데이터 반영 (Live Data) ---
+  // selectedPhoto는 '클릭 당시'의 스냅샷이므로, 
+  // photos 배열에서 최신 상태를 찾아와야 태그 수정 시 즉시 반영됨.
+  const liveSelectedPhoto = selectedPhoto 
+    ? (photos.find(p => p.id === selectedPhoto.id) || selectedPhoto) 
+    : null;
+
+  // 멤버 프로필도 실시간 정보(댓글 수 등) 반영을 위해 연결
+  const liveSelectedMember = selectedMember
+    ? (members.find(m => m.id === selectedMember.id) || selectedMember)
+    : null;
+
+  // ----------------------------------------------------
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -74,7 +85,6 @@ export default function App() {
 
   useEffect(() => {
     const handlePopState = (event) => {
-      // ★ [수정] 뒤로가기 시 닫을 순서 (사진 -> 멤버프로필 -> 앨범)
       if (selectedPhoto) setSelectedPhoto(null);
       else if (selectedMember) setSelectedMember(null);
       else if (activeAlbumId) setActiveAlbumId(null);
@@ -157,7 +167,6 @@ export default function App() {
     try { await updateDoc(doc(db, "photos", photo.id), { viewCount: increment(1) }); } catch (e) {}
   };
 
-  // ★ [추가] 회원 프로필 열기
   const handleOpenMemberProfile = (member) => {
     window.history.pushState({ modal: 'profile' }, '');
     setSelectedMember(member);
@@ -240,15 +249,14 @@ export default function App() {
             >
               {activeAlbumId && <div className="absolute inset-0 z-40 bg-white flex flex-col animate-fade-in"><AlbumDetailOverlay albumId={activeAlbumId} collections={collections} photos={photos} onClose={handleClosePopup} onPhotoClick={handleOpenDetail} /></div>}
               
-              {/* ★ [추가] 회원 상세 프로필 (사진 상세보다 밑에 깔려야 하므로 여기에 위치) */}
-              {selectedMember && <div className="absolute inset-0 z-40 bg-white flex flex-col animate-fade-in"><MemberProfileView member={selectedMember} photos={photos} onClose={handleClosePopup} onPhotoClick={handleOpenDetail} /></div>}
+              {/* ★ [수정됨] liveSelectedMember 사용 */}
+              {liveSelectedMember && <div className="absolute inset-0 z-40 bg-white flex flex-col animate-fade-in"><MemberProfileView member={liveSelectedMember} photos={photos} onClose={handleClosePopup} onPhotoClick={handleOpenDetail} /></div>}
 
-              {/* 사진 상세가 최상위(z-50)에 떠야 함 */}
-              {selectedPhoto && <div className="absolute inset-0 z-50 bg-white flex flex-col animate-fade-in"><PhotoDetailView photo={selectedPhoto} onClose={handleClosePopup} openSaveModal={setSavingPhotoId} activeAlbumId={activeAlbumId} toggleCollectionItem={toggleCollectionItem} showToast={showToast} /></div>}
+              {/* ★ [수정됨] liveSelectedPhoto 사용 -> 태그 저장 시 즉시 화면 갱신됨! */}
+              {liveSelectedPhoto && <div className="absolute inset-0 z-50 bg-white flex flex-col animate-fade-in"><PhotoDetailView photo={liveSelectedPhoto} onClose={handleClosePopup} openSaveModal={setSavingPhotoId} activeAlbumId={activeAlbumId} toggleCollectionItem={toggleCollectionItem} showToast={showToast} /></div>}
 
               {activeTab === 'home' && <HomeTab photos={photos} collections={collections} openSaveModal={setSavingPhotoId} onPhotoClick={handleOpenDetail} />}
               
-              {/* ★ [수정] onMemberClick 전달 */}
               {activeTab === 'members' && <MembersTab members={members} photos={photos} onPhotoClick={handleOpenDetail} onMemberClick={handleOpenMemberProfile} userData={currentUserRealtime} />}
               
               {activeTab === 'upload' && <UploadTab setActiveTab={setActiveTab} showToast={showToast} userData={currentUserRealtime} setLoading={setAppLoading} />}
