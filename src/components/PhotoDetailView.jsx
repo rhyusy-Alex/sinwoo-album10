@@ -22,15 +22,22 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
   const handleLike = async () => {
     if (!currentUser) return;
     const photoRef = doc(db, 'photos', photo.id);
-    const userRef = doc(db, 'users', currentUser.uid);
+    const userRef = doc(db, 'users', currentUser.uid); // 나 (보낸 사람)
+    
+    // ★ [중요] 사진 주인 (받은 사람) 참조
+    const authorRef = photo.uploaderId ? doc(db, 'users', photo.uploaderId) : null;
     
     try {
       if (isLiked) {
+        // 좋아요 취소
         await updateDoc(photoRef, { likes: arrayRemove(currentUser.uid) });
         await updateDoc(userRef, { givenHeartCount: increment(-1) });
+        if (authorRef) await updateDoc(authorRef, { rxHeartCount: increment(-1) }); // 받은 사람 점수 차감
       } else {
+        // 좋아요
         await updateDoc(photoRef, { likes: arrayUnion(currentUser.uid) });
         await updateDoc(userRef, { givenHeartCount: increment(1) });
+        if (authorRef) await updateDoc(authorRef, { rxHeartCount: increment(1) }); // 받은 사람 점수 증가
       }
     } catch (e) { console.error(e); }
   };
@@ -59,14 +66,12 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
 
   const handleDelete = async () => {
     if (!confirm('정말로 삭제하시겠습니까?')) return;
-    onClose(); // 상세창 닫기
+    onClose(); 
     try {
-      // 스토리지 이미지 삭제
       await deleteObject(ref(storage, photo.url)).catch((e) => console.log(e));
-      // DB 문서 삭제
       await deleteDoc(doc(db, 'photos', photo.id));
-      // 유저 업로드 카운트 감소
       if (photo.uploaderId) {
+        // 삭제 시 점수도 회수
         await updateDoc(doc(db, 'users', photo.uploaderId), { uploadCount: increment(-1) });
       }
       if(showToast) showToast('삭제되었습니다.');
@@ -118,7 +123,6 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
       </div>
 
       <ScrollContent type="list" className="relative">
-        {/* 사진 표시 영역 */}
         <div className="w-full bg-black flex items-center justify-center relative group">
           <img src={photo.url} className="w-full h-auto max-h-[60vh] object-contain" alt="detail" />
           <button onClick={(e) => { e.stopPropagation(); window.open(photo.url, '_blank'); }} className="absolute bottom-3 right-3 bg-white/20 hover:bg-white/40 text-white backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 transition-all">
@@ -126,7 +130,6 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
           </button>
         </div>
 
-        {/* 상세 정보 영역 */}
         <div className="p-5 border-b">
           <div className="flex justify-between items-start mb-4">
             <div className="flex-1 mr-2">
@@ -165,7 +168,6 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
           </div>
         </div>
 
-        {/* 댓글 섹션 */}
         <CommentSection 
           photoId={photo.id} 
           currentUser={currentUser} 
@@ -174,7 +176,6 @@ export default function PhotoDetailView({ photo, onClose, activeAlbumId, toggleC
         />
       </ScrollContent>
 
-      {/* 로컬 태그 수정 모달 */}
       {editingTags && <TagEditModal photo={photo} onSave={handleTagSave} closeModal={() => setEditingTags(false)} />}
     </div>
   );

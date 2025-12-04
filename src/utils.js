@@ -1,5 +1,7 @@
-// --- 버전 정보 ---
-export const APP_VERSION = '1.1.0 (Refactored)';
+import versionData from './version.json';
+
+// --- 버전 정보 (자동화됨) ---
+export const APP_VERSION = `Ver ${versionData.version} (${versionData.buildTime})`;
 
 // --- 상수 (점수 정책) ---
 export const POINTS = { UPLOAD: 100, RX_COMMENT: 10, WR_COMMENT: 20, RX_HEART: 3, GV_HEART: 5, TAG_EDIT: 20 };
@@ -12,7 +14,7 @@ export const formatTag = (tag) => {
   return /^\d+$/.test(tag) ? tag + '기' : tag;
 };
 
-// 2. 날짜 포맷팅 (★ 이 부분이 에러의 원인! 꼭 있어야 함)
+// 2. 날짜 포맷팅
 export const formatDate = (timestamp) => {
   if (!timestamp || !timestamp.seconds) return '';
   try {
@@ -34,7 +36,7 @@ export const sortTagsSmart = (tags) => {
   });
 };
 
-// 4. 실시간 통계 계산
+// 4. 실시간 통계 계산 (프로필 상세 등에서 사용)
 export const calculateRealtimeStats = (photos) => {
   const stats = {};
   if (!photos || !Array.isArray(photos)) return stats;
@@ -50,14 +52,24 @@ export const calculateRealtimeStats = (photos) => {
   return stats;
 };
 
-// 5. 유저 점수 계산
+// 5. 유저 점수 계산 (DB 최적화 버전: DB값을 우선 사용)
 export const calculateUserScore = (userDoc, stats) => {
   if (!userDoc) return 0;
-  const s = stats[userDoc.id] || { upload: 0, rxHeart: 0, rxComment: 0 };
-  return (s.upload * POINTS.UPLOAD) + 
-         (s.rxHeart * POINTS.RX_HEART) + 
-         (s.rxComment * POINTS.RX_COMMENT) + 
-         ((userDoc.commentCount || 0) * POINTS.WR_COMMENT) + 
-         ((userDoc.givenHeartCount || 0) * POINTS.GV_HEART) +
-         ((userDoc.tagEditCount || 0) * POINTS.TAG_EDIT);
+  
+  // stats(사진 집계)가 있으면 쓰고, 없으면 userDoc(DB 저장값)을 사용
+  // 무한 스크롤 적용 후에는 stats가 부분적일 수 있으므로 userDoc 값이 더 정확함
+  const upload = userDoc.uploadCount || stats?.[userDoc.id]?.upload || 0;
+  const rxHeart = userDoc.rxHeartCount || stats?.[userDoc.id]?.rxHeart || 0;
+  const rxComment = userDoc.rxCommentCount || stats?.[userDoc.id]?.rxComment || 0;
+  
+  const wrComment = userDoc.commentCount || 0;
+  const gvHeart = userDoc.givenHeartCount || 0;
+  const tagEdit = userDoc.tagEditCount || 0;
+
+  return (upload * POINTS.UPLOAD) + 
+         (rxHeart * POINTS.RX_HEART) + 
+         (rxComment * POINTS.RX_COMMENT) + 
+         (wrComment * POINTS.WR_COMMENT) + 
+         (gvHeart * POINTS.GV_HEART) +
+         (tagEdit * POINTS.TAG_EDIT);
 };
