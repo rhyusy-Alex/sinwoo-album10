@@ -1,24 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { PageLayout, ScrollContent, LoadingSpinner } from '../components/Layout';
-import { MessageCircle, ArrowDownCircle } from 'lucide-react';
+import { MessageCircle, ArrowDownCircle, Search } from 'lucide-react';
 import { db } from '../firebase';
 import { collection, query, orderBy, limit, startAfter, getDocs } from 'firebase/firestore';
 
 export default function HomeTab({ openSaveModal, onPhotoClick }) {
   const [photos, setPhotos] = useState([]);
-  const [lastDoc, setLastDoc] = useState(null); // 다음 페이지 시작점
+  const [lastDoc, setLastDoc] = useState(null); 
   const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(true); // 더 불러올게 남았나?
+  const [hasMore, setHasMore] = useState(true); 
   
-  // 검색/필터 상태 (현재 로딩된 것들 내에서만 동작)
   const [searchTerm, setSearchTerm] = useState('');
   const [sortOption, setSortOption] = useState('upload_desc');
 
-  // 1. 첫 페이지 로딩 (초기화)
   const fetchInitialPhotos = async () => {
     setLoading(true);
     try {
-      // 최신순 21개 가져오기
       const q = query(
         collection(db, 'photos'), 
         orderBy('timestamp', 'desc'), 
@@ -40,7 +37,6 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
     fetchInitialPhotos();
   }, []);
 
-  // 2. 더 보기 (다음 페이지)
   const fetchMorePhotos = async () => {
     if (!lastDoc || loading) return;
     setLoading(true);
@@ -55,7 +51,7 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
       
       if (!snapshot.empty) {
         const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setPhotos(prev => [...prev, ...list]); // 기존 리스트 뒤에 붙이기
+        setPhotos(prev => [...prev, ...list]); 
         setLastDoc(snapshot.docs[snapshot.docs.length - 1]);
         setHasMore(snapshot.docs.length === 21);
       } else {
@@ -67,7 +63,6 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
     setLoading(false);
   };
 
-  // --- 클라이언트 사이드 필터링 (불러온 데이터 내에서) ---
   const filtered = photos.filter((p) => 
     (p.desc || "").includes(searchTerm) || 
     (p.tags && p.tags.some((t) => t.includes(searchTerm))) || 
@@ -91,30 +86,43 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
 
   return (
     <PageLayout>
-      {/* 상단 검색바 */}
-      <div className="p-3 border-b sticky top-0 bg-white z-10 flex flex-col gap-2 shadow-sm">
-        <div className="relative w-full">
-          <input 
-            className="w-full p-2 pl-9 border rounded-lg text-sm bg-gray-50 outline-none focus:ring-1 focus:ring-blue-200" 
-            placeholder="검색 (현재 로딩된 사진 중)" 
-            value={searchTerm} 
-            onChange={(e) => setSearchTerm(e.target.value)} 
-          />
-          <div className="absolute left-3 top-2.5 text-gray-400">🔍</div>
+      {/* 상단 헤더 영역 */}
+      <div className="bg-white z-10 flex flex-col sticky top-0 border-b border-gray-100 shadow-sm">
+        <div className="px-5 pt-6 pb-4 bg-gradient-to-r from-blue-50 to-white">
+          {/* ★ [수정됨] 상단 장식 삭제 & 한 줄 배치 */}
+          <h2 className="text-xl font-bold text-gray-900 leading-tight">
+            함께 쌓아가는 <span className="text-blue-900">신우의 추억</span> 📸
+          </h2>
+          <p className="text-xs text-gray-500 mt-1">그 시절 우리가 사랑했던 순간들을 찾아보세요.</p>
         </div>
-        <div className="flex justify-between items-center">
-          <select 
-            className="text-xs font-bold bg-gray-50 border rounded-lg px-2 py-1.5 outline-none text-gray-600" 
-            value={sortOption} 
-            onChange={(e) => setSortOption(e.target.value)}
-          >
-            <option value="upload_desc">최근 게시물</option>
-            <option value="upload_asc">과거 게시물</option>
-            <option value="year_desc">최근 촬영일</option>
-            <option value="year_asc">과거 촬영일</option>
-            <option value="random">랜덤 추억</option>
-          </select>
-          <span className="text-[10px] text-gray-400">총 {photos.length}장 로딩됨</span>
+
+        {/* 검색 및 필터 바 */}
+        <div className="p-3 flex flex-col gap-2 bg-white">
+          <div className="relative w-full">
+            <input 
+              className="w-full p-3 pl-10 border border-gray-200 rounded-xl text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-100 focus:bg-white transition-all" 
+              placeholder="검색 (이름, 기수, 내용)" 
+              value={searchTerm} 
+              onChange={(e) => setSearchTerm(e.target.value)} 
+            />
+            <div className="absolute left-3 top-3 text-gray-400">
+              <Search size={18}/>
+            </div>
+          </div>
+          <div className="flex justify-between items-center px-1">
+            <span className="text-[10px] text-gray-400 font-medium">현재 {photos.length}장의 추억</span>
+            <select 
+              className="text-xs font-bold bg-white border border-gray-200 rounded-lg px-2 py-1.5 outline-none text-gray-600 focus:border-blue-500" 
+              value={sortOption} 
+              onChange={(e) => setSortOption(e.target.value)}
+            >
+              <option value="upload_desc">최근 게시물</option>
+              <option value="upload_asc">과거 게시물</option>
+              <option value="year_desc">최근 촬영일</option>
+              <option value="year_asc">과거 촬영일</option>
+              <option value="random">랜덤 추억</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -123,9 +131,9 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
         <div className={`grid gap-0.5 grid-cols-3`}>
           {sortedPhotos.map((p) => (
             <div key={p.id} onClick={() => onPhotoClick(p)} className="aspect-square cursor-pointer relative overflow-hidden group">
-              <img src={p.url} className="w-full h-full object-cover" loading="lazy" alt="thumb" />
+              <img src={p.url} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110" loading="lazy" alt="thumb" />
               {p.commentsCount > 0 && (
-                <div className="absolute top-1 right-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1">
+                <div className="absolute top-1 right-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 backdrop-blur-sm">
                   <MessageCircle size={10} /> {p.commentsCount}
                 </div>
               )}
@@ -138,22 +146,22 @@ export default function HomeTab({ openSaveModal, onPhotoClick }) {
           ))}
         </div>
 
-        {/* 더 보기 버튼 */}
         {hasMore && (
-          <div className="p-4 flex justify-center">
+          <div className="p-6 flex justify-center pb-20">
             <button 
               onClick={fetchMorePhotos} 
               disabled={loading}
-              className="flex items-center gap-2 px-6 py-2 bg-gray-100 text-gray-600 rounded-full text-sm font-bold hover:bg-gray-200 transition-colors"
+              className="flex items-center gap-2 px-6 py-3 bg-white border border-gray-200 text-gray-600 rounded-full text-sm font-bold hover:bg-gray-50 hover:text-blue-600 hover:border-blue-200 transition-all shadow-sm active:scale-95"
             >
-              {loading ? <LoadingSpinner msg=""/> : <><ArrowDownCircle size={16}/> 더 보기</>}
+              {loading ? <LoadingSpinner msg=""/> : <><ArrowDownCircle size={16}/> 추억 더 불러오기</>}
             </button>
           </div>
         )}
         
         {!hasMore && photos.length > 0 && (
-          <div className="p-6 text-center text-xs text-gray-300">
-            모든 추억을 다 불러왔습니다.
+          <div className="p-8 text-center">
+            <p className="text-xs text-gray-300 mb-2">모든 추억을 다 불러왔습니다.</p>
+            <div className="w-24 h-1 bg-gray-100 mx-auto rounded-full"></div>
           </div>
         )}
       </ScrollContent>
