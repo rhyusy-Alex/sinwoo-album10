@@ -1,39 +1,63 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PageLayout, ScrollContent, LoadingSpinner } from '../components/Layout';
-import { Crown, LogOut, Camera, BookHeart, ChevronRight, RefreshCw } from 'lucide-react';
+import { Crown, LogOut, Camera, BookHeart, ChevronRight, RefreshCw, MessageCircle } from 'lucide-react';
 import { auth, db } from '../firebase';
 import { signOut } from 'firebase/auth';
-import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
-import { calculateRealtimeStats, calculateUserScore, POINTS } from '../utils';
+import { collection, getDocs, doc, updateDoc, query, where } from 'firebase/firestore';
+import { calculateUserScore, POINTS } from '../utils';
 
 export default function MyPageTab({ userData, photos, members, collections, renameCollection, onOpenAlbum, onPhotoClick }) {
   if (!userData) return <LoadingSpinner msg="내 정보를 불러오는 중..." />;
 
   const [syncing, setSyncing] = useState(false);
+  
+  // ★ [복구됨] 내 사진 가져오기 상태
+  const [myPhotos, setMyPhotos] = useState([]);
+  const [loadingPhotos, setLoadingPhotos] = useState(true);
 
-  // 실시간 통계 (photos가 비어있으면 0이 나옴 -> 아래 DB값과 병합 사용)
-  const stats = calculateRealtimeStats(photos || []);
-  const myStats = stats[userData.id] || { upload: 0, rxHeart: 0, rxComment: 0 };
+  // ★ [복구됨] 내 사진 직접 가져오기 (인덱스 에러 방지를 위해 정렬은 JS로 처리)
+  useEffect(() => {
+    const fetchMyPhotos = async () => {
+      setLoadingPhotos(true);
+      try {
+        const q = query(
+          collection(db, 'photos'),
+          where('uploaderId', '==', userData.id)
+        );
+        const snapshot = await getDocs(q);
+        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        // 최신순 정렬 후 5개만 자르기
+        list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+        setMyPhotos(list.slice(0, 5));
+        
+      } catch (e) {
+        console.error("내 사진 로딩 실패:", e);
+      }
+      setLoadingPhotos(false);
+    };
+
+    fetchMyPhotos();
+  }, [userData.id]);
+
+
+  // 점수 계산
+  const myTotalScore = calculateUserScore(userData, null);
   
-  // 점수 계산 (utils.js 수정본 덕분에 DB값도 참조함)
-  const myTotalScore = calculateUserScore(userData, stats);
-  
-  const allScores = members.map(m => calculateUserScore(m, stats)).sort((a, b) => b - a);
+  const allScores = members.map(m => calculateUserScore(m, null)).sort((a, b) => b - a);
   const myRank = allScores.indexOf(myTotalScore) + 1;
   const totalUsers = members.length || 1; 
   const topPercent = Math.ceil((myRank / totalUsers) * 100);
   
-  // ★ [관리자 기능] 점수 강제 동기화 (잃어버린 점수 복구)
+  // 점수 동기화 기능
   const handleSyncScores = async () => {
     if (!confirm("모든 사진을 전수 조사하여 회원들의 점수(업로드, 받은하트, 받은댓글)를 DB에 기록하시겠습니까?\n(시간이 조금 걸릴 수 있습니다)")) return;
     
     setSyncing(true);
     try {
-      // 1. 모든 사진 가져오기 (이때만 일시적으로 많이 읽음)
       const querySnapshot = await getDocs(collection(db, "photos"));
       const allPhotos = querySnapshot.docs.map(d => d.data());
       
-      // 2. 통계 계산
       const newStats = {};
       allPhotos.forEach(p => {
         const uid = p.uploaderId;
@@ -45,18 +69,17 @@ export default function MyPageTab({ userData, photos, members, collections, rena
         }
       });
 
-      // 3. 각 유저 DB 업데이트
       const updatePromises = Object.keys(newStats).map(uid => {
         return updateDoc(doc(db, "users", uid), {
           uploadCount: newStats[uid].upload,
-          rxHeartCount: newStats[uid].rxHeart,   // 받은 하트 저장
-          rxCommentCount: newStats[uid].rxComment // 받은 댓글 저장
+          rxHeartCount: newStats[uid].rxHeart,
+          rxCommentCount: newStats[uid].rxComment
         });
       });
       
       await Promise.all(updatePromises);
       alert("동기화 완료! 모든 회원의 점수가 복구되었습니다. 🎉");
-      window.location.reload(); // 새로고침하여 반영
+      window.location.reload(); 
       
     } catch (e) {
       console.error(e);
@@ -89,7 +112,6 @@ export default function MyPageTab({ userData, photos, members, collections, rena
               <LogOut size={12}/> 로그아웃
             </button>
             
-            {/* ★ 관리자 전용 동기화 버튼 */}
             {userData.role === 'admin' && (
               <button onClick={handleSyncScores} disabled={syncing} className="text-xs text-blue-600 border border-blue-200 bg-blue-50 px-4 py-1.5 rounded-full flex items-center gap-1 hover:bg-blue-100 transition-colors">
                 {syncing ? <LoadingSpinner msg=""/> : <><RefreshCw size={12}/> 점수 복구(동기화)</>}
@@ -112,6 +134,27 @@ export default function MyPageTab({ userData, photos, members, collections, rena
             <div className="bg-gray-50 p-3 rounded-xl text-center border border-gray-200"><p className="text-xs text-gray-500 font-bold mb-1">✍️ 보낸댓글</p><p className="font-bold text-lg text-gray-700">{(userData.commentCount||0)*POINTS.WR_COMMENT}점</p><p className="text-[10px] text-gray-400">({userData.commentCount||0}개)</p></div>
             <div className="bg-gray-50 p-3 rounded-xl text-center border border-gray-200"><p className="text-xs text-gray-500 font-bold mb-1">🤍 보낸하트</p><p className="font-bold text-lg text-gray-700">{(userData.givenHeartCount||0)*POINTS.GV_HEART}점</p><p className="text-[10px] text-gray-400">({userData.givenHeartCount||0}개)</p></div>
           </div>
+        </div>
+
+        {/* ★ [복구됨] 실수로 지웠던 '최근 올린 추억' 섹션 */}
+        <div className="mt-8 px-4">
+          <h3 className="font-bold text-lg text-gray-800 mb-4 flex items-center gap-2"><Camera size={20} className="text-purple-500"/> 최근 올린 추억</h3>
+          {loadingPhotos ? (
+             <div className="p-4 text-center"><LoadingSpinner msg="로딩중..."/></div>
+          ) : myPhotos.length === 0 ? ( 
+            <div className="bg-gray-50 rounded-xl p-6 text-center border border-dashed border-gray-300"><p className="text-gray-400 text-sm">아직 올린 사진이 없습니다.<br/>첫 사진을 올리고 100점을 받아보세요!</p></div> 
+          ) : ( 
+            <div className="flex gap-2 overflow-x-auto pb-2 hide-scrollbar">
+              {myPhotos.map(p => { 
+                return (
+                  <div key={p.id} onClick={() => onPhotoClick(p)} className="flex-shrink-0 w-24 h-24 rounded-lg overflow-hidden relative cursor-pointer border border-gray-200 shadow-sm">
+                    <img src={p.url} className="w-full h-full object-cover" alt="recent" />
+                    {p.commentsCount > 0 && <div className="absolute top-1 right-1 bg-black/50 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1"><MessageCircle size={10}/> {p.commentsCount}</div>}
+                  </div>
+                ); 
+              })}
+            </div> 
+          )}
         </div>
 
         <div className="p-4 mt-4 mb-8">

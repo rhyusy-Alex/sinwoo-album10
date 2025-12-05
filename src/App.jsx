@@ -3,6 +3,8 @@ import { Camera, PlusSquare, User, Share2, BookHeart, Trophy } from 'lucide-reac
 import { db, auth } from './firebase';
 import { collection, onSnapshot, query, where, doc, getDoc, serverTimestamp, addDoc, updateDoc, increment, deleteDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
+// ★ [추가] 애니메이션 라이브러리
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { APP_VERSION } from './utils';
 import { LoadingSpinner, NavBtn } from './components/Layout';
@@ -24,38 +26,63 @@ export default function App() {
   const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  
+  // --- 탭 & 애니메이션 상태 관리 ---
   const [activeTab, setActiveTab] = useState('home');
+  const [direction, setDirection] = useState(0); // 1: 오른쪽(다음), -1: 왼쪽(이전)
+  const TABS = ['home', 'members', 'upload', 'albums', 'mypage'];
+  
   const isDetailViewRef = useRef(false);
 
-  // photos 배열은 이제 전역에서 사용하지 않음 (빈 배열)
-  // *주의: 이로 인해 Ranking 점수가 일시적으로 0점이 됩니다. (다음 단계에서 해결)
+  // photos 배열 미사용 (각 탭에서 직접 fetch)
   const photos = []; 
   
   const [members, setMembers] = useState([]);
   const [collections, setCollections] = useState([]);
 
   const [activeAlbumId, setActiveAlbumId] = useState(null);
-  
-  // 선택된 항목 ID 관리
   const [selectedPhotoId, setSelectedPhotoId] = useState(null);
   const [selectedMemberId, setSelectedMemberId] = useState(null);
-  
-  // ★ 단일 항목 실시간 데이터 (상세 화면용)
   const [livePhoto, setLivePhoto] = useState(null);
   
   const [savingPhotoId, setSavingPhotoId] = useState(null);
   const [toast, setToast] = useState(null);
   const [appLoading, setAppLoading] = useState(false);
 
-  const TABS = ['home', 'members', 'upload', 'albums', 'mypage'];
+  // ★ [추가] 탭 변경 핸들러 (방향 계산 포함)
+  const handleTabChange = (newTab) => {
+    if (newTab === activeTab) return;
+    const newIndex = TABS.indexOf(newTab);
+    const oldIndex = TABS.indexOf(activeTab);
+    // 새 탭이 뒤에 있으면 1(오른쪽), 앞에 있으면 -1(왼쪽)
+    setDirection(newIndex > oldIndex ? 1 : -1);
+    setActiveTab(newTab);
+  };
+
+  // ★ [추가] 슬라이드 애니메이션 설정값
+  const pageVariants = {
+    initial: (direction) => ({
+      x: direction > 0 ? '100%' : '-100%',
+      opacity: 0, // 살짝 투명하게 시작
+    }),
+    animate: {
+      x: 0,
+      opacity: 1,
+      transition: { duration: 0.3, ease: "easeOut" } // 부드러운 감속
+    },
+    exit: (direction) => ({
+      x: direction < 0 ? '100%' : '-100%',
+      opacity: 0, // 나갈 때 투명해짐
+      transition: { duration: 0.3, ease: "easeIn" }
+    })
+  };
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
   };
 
-  // --- 1. 사진 상세 실시간 구독 (Single Doc Listener) ---
-  // 사용자가 사진을 클릭하면, 그 사진 하나의 데이터만 실시간으로 가져옴
+  // --- 실시간 데이터 구독 ---
   useEffect(() => {
     if (!selectedPhotoId) {
       setLivePhoto(null);
@@ -65,7 +92,6 @@ export default function App() {
       if (docSnap.exists()) {
         setLivePhoto({ id: docSnap.id, ...docSnap.data() });
       } else {
-        // 사진이 삭제된 경우
         setLivePhoto(null);
         setSelectedPhotoId(null);
         showToast("삭제된 사진입니다.");
@@ -74,10 +100,9 @@ export default function App() {
     return () => unsubscribe();
   }, [selectedPhotoId]);
 
-  // --- 2. 멤버 데이터 매핑 ---
   const selectedMember = selectedMemberId ? members.find(m => m.id === selectedMemberId) : null;
 
-  // --- 초기화 및 인증 ---
+  // --- 초기화 ---
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const photoId = params.get('photoId');
@@ -87,12 +112,10 @@ export default function App() {
     }
   }, []);
 
-  // 딥링크 처리 (유저 로그인 후 실행)
   useEffect(() => {
     if (user) {
       const pendingPhotoId = sessionStorage.getItem('pendingPhotoId');
       if (pendingPhotoId) {
-        // ID만 있으면 열 수 있음
         setSelectedPhotoId(pendingPhotoId); 
         window.history.pushState({ modal: 'photo' }, '');
         showToast("공유받은 사진을 열었습니다! 🎁");
@@ -134,7 +157,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 회원 목록 구독
   useEffect(() => {
     if (!user) return;
     const unsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
@@ -143,7 +165,6 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // 앨범 목록 구독
   useEffect(() => {
     if (!user) { setCollections([]); return; }
     const q = query(collection(db, 'albums'), where('userId', '==', user.uid));
@@ -163,16 +184,15 @@ export default function App() {
     isDetailViewRef.current = !!selectedPhotoId || !!selectedMemberId || (activeTab === 'albums' && !!activeAlbumId);
   }, [selectedPhotoId, selectedMemberId, activeAlbumId, activeTab]);
 
-  // --- 핸들러 함수들 ---
   const handleOpenAlbum = (albumId) => {
     window.history.pushState({ modal: 'album' }, ''); 
     setActiveAlbumId(albumId);
-    setActiveTab('albums');
+    handleTabChange('albums'); // 앨범 탭으로 이동 시 애니메이션 적용
   };
 
   const handleOpenDetail = async (photo) => {
     window.history.pushState({ modal: 'photo' }, '');
-    setSelectedPhotoId(photo.id); // ID 저장 -> useEffect가 데이터 fetch
+    setSelectedPhotoId(photo.id); 
     try { await updateDoc(doc(db, "photos", photo.id), { viewCount: increment(1) }); } catch (e) {}
   };
 
@@ -226,9 +246,24 @@ export default function App() {
 
   const [touchStart, setTouchStart] = useState(null);
   const [touchEnd, setTouchEnd] = useState(null);
+  
   const onTouchStart = (e) => { setTouchEnd(null); setTouchStart(e.targetTouches[0].clientX); };
   const onTouchMove = (e) => setTouchEnd(e.targetTouches[0].clientX);
-  const onTouchEnd = () => { if (!touchStart || !touchEnd) return; if (isDetailViewRef.current) return; const distance = touchStart - touchEnd; if (distance > 50) { const i = TABS.indexOf(activeTab); if (i < TABS.length - 1) setActiveTab(TABS[i + 1]); } if (distance < -50) { const i = TABS.indexOf(activeTab); if (i > 0) setActiveTab(TABS[i - 1]); } };
+  
+  // ★ [수정] 스와이프 핸들러: setActiveTab 대신 handleTabChange 사용
+  const onTouchEnd = () => { 
+    if (!touchStart || !touchEnd) return; 
+    if (isDetailViewRef.current) return; 
+    const distance = touchStart - touchEnd; 
+    if (distance > 50) { 
+      const i = TABS.indexOf(activeTab); 
+      if (i < TABS.length - 1) handleTabChange(TABS[i + 1]); 
+    } 
+    if (distance < -50) { 
+      const i = TABS.indexOf(activeTab); 
+      if (i > 0) handleTabChange(TABS[i - 1]); 
+    } 
+  };
 
   if (loading) return <div className="min-h-screen w-full bg-gray-200 flex justify-center items-center"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div></div>;
   if (user && !userData) return <LoadingSpinner msg="회원 정보를 불러오는 중..." />;
@@ -252,36 +287,43 @@ export default function App() {
               <button onClick={handleShareApp} className="p-2 text-gray-600 hover:bg-gray-100 rounded-full"><Share2 size={20} /></button>
             </header>
 
+            {/* ★ [수정] 메인 영역: 스와이프 및 애니메이션 적용 */}
             <main
-              className="flex-1 overflow-hidden p-0 relative bg-white"
+              className="flex-1 overflow-hidden relative bg-white"
               onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
             >
+              {/* 전역 오버레이들 (애니메이션과 무관하게 위에 뜸) */}
               {activeAlbumId && <div className="absolute inset-0 z-40 bg-white flex flex-col animate-fade-in"><AlbumDetailOverlay albumId={activeAlbumId} collections={collections} onClose={handleClosePopup} onPhotoClick={handleOpenDetail} /></div>}
-              
-              {/* 멤버 프로필: photos는 빈 배열 (다음 단계에서 수정 필요) */}
               {selectedMember && <div className="absolute inset-0 z-40 bg-white flex flex-col animate-fade-in"><MemberProfileView member={selectedMember} photos={[]} onClose={handleClosePopup} onPhotoClick={handleOpenDetail} /></div>}
-
-              {/* ★ [핵심] livePhoto 사용: 선택된 사진 상세 정보가 잘 뜸 */}
               {livePhoto && <div className="absolute inset-0 z-50 bg-white flex flex-col animate-fade-in"><PhotoDetailView photo={livePhoto} onClose={handleClosePopup} openSaveModal={setSavingPhotoId} activeAlbumId={activeAlbumId} toggleCollectionItem={toggleCollectionItem} showToast={showToast} /></div>}
 
-              {activeTab === 'home' && <HomeTab openSaveModal={setSavingPhotoId} onPhotoClick={handleOpenDetail} />}
-              
-              {/* photos=[] 이므로 랭킹은 0점으로 나옴 (정상) */}
-              {activeTab === 'members' && <MembersTab members={members} photos={[]} onPhotoClick={handleOpenDetail} onMemberClick={handleOpenMemberProfile} userData={currentUserRealtime} />}
-              
-              {activeTab === 'upload' && <UploadTab setActiveTab={setActiveTab} showToast={showToast} userData={currentUserRealtime} setLoading={setAppLoading} />}
-              
-              {activeTab === 'albums' && <AlbumsTab collections={collections} onOpenAlbum={handleOpenAlbum} createCollection={createCollection} deleteCollection={deleteCollection} renameCollection={renameCollection} />}
-              
-              {activeTab === 'mypage' && <MyPageTab userData={currentUserRealtime} photos={[]} members={members} collections={collections} renameCollection={renameCollection} onOpenAlbum={(id) => handleOpenAlbum(id, 'mypage')} onPhotoClick={handleOpenDetail} />}
+              {/* ★ [핵심] AnimatePresence로 탭 전환 애니메이션 구현 */}
+              <AnimatePresence initial={false} custom={direction} mode="popLayout">
+                <motion.div
+                  key={activeTab} // 키가 바뀌면 애니메이션 실행
+                  custom={direction}
+                  variants={pageVariants}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  className="w-full h-full absolute inset-0" // 겹쳐서 애니메이션 되도록 절대위치
+                >
+                  {activeTab === 'home' && <HomeTab openSaveModal={setSavingPhotoId} onPhotoClick={handleOpenDetail} />}
+                  {activeTab === 'members' && <MembersTab members={members} photos={[]} onPhotoClick={handleOpenDetail} onMemberClick={handleOpenMemberProfile} userData={currentUserRealtime} />}
+                  {activeTab === 'upload' && <UploadTab setActiveTab={handleTabChange} showToast={showToast} userData={currentUserRealtime} setLoading={setAppLoading} />}
+                  {activeTab === 'albums' && <AlbumsTab collections={collections} onOpenAlbum={handleOpenAlbum} createCollection={createCollection} deleteCollection={deleteCollection} renameCollection={renameCollection} />}
+                  {activeTab === 'mypage' && <MyPageTab userData={currentUserRealtime} photos={[]} members={members} collections={collections} renameCollection={renameCollection} onOpenAlbum={(id) => { setActiveAlbumId(id); handleTabChange('albums'); }} onPhotoClick={handleOpenDetail} />}
+                </motion.div>
+              </AnimatePresence>
             </main>
 
+            {/* 하단 탭바: setActiveTab 대신 handleTabChange 사용 */}
             <nav className="bg-white border-t flex justify-around items-center h-16 absolute bottom-0 w-full z-30 px-1 shrink-0">
-              <NavBtn icon={<Camera />} label="홈" active={activeTab === 'home'} onClick={() => setActiveTab('home')} />
-              <NavBtn icon={<Trophy />} label="랭킹" active={activeTab === 'members'} onClick={() => setActiveTab('members')} />
-              <NavBtn icon={<PlusSquare />} label="업로드" active={activeTab === 'upload'} onClick={() => setActiveTab('upload')} />
-              <NavBtn icon={<BookHeart />} label="앨범" active={activeTab === 'albums'} onClick={() => setActiveTab('albums')} />
-              <NavBtn icon={<User />} label="내정보" active={activeTab === 'mypage'} onClick={() => setActiveTab('mypage')} />
+              <NavBtn icon={<Camera />} label="홈" active={activeTab === 'home'} onClick={() => handleTabChange('home')} />
+              <NavBtn icon={<Trophy />} label="랭킹" active={activeTab === 'members'} onClick={() => handleTabChange('members')} />
+              <NavBtn icon={<PlusSquare />} label="업로드" active={activeTab === 'upload'} onClick={() => handleTabChange('upload')} />
+              <NavBtn icon={<BookHeart />} label="앨범" active={activeTab === 'albums'} onClick={() => handleTabChange('albums')} />
+              <NavBtn icon={<User />} label="내정보" active={activeTab === 'mypage'} onClick={() => handleTabChange('mypage')} />
             </nav>
             
             {appLoading && (<div className="absolute inset-0 bg-black/50 z-50 flex items-center justify-center text-white"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-white mb-2"></div></div>)}

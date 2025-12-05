@@ -7,6 +7,7 @@ import { addDoc, collection, doc, updateDoc, increment, serverTimestamp } from '
 import GisuInput from '../components/GisuInput';
 
 export default function UploadTab({ setActiveTab, showToast, userData, setLoading }) {
+  // 방어 코드: 유저 정보가 로딩 안 됐으면 스피너 표시
   if (!userData) return <LoadingSpinner msg="회원 정보를 불러오는 중..." />;
 
   const [desc, setDesc] = useState('');
@@ -25,7 +26,7 @@ export default function UploadTab({ setActiveTab, showToast, userData, setLoadin
       await uploadBytes(fileRef, file);
       const url = await getDownloadURL(fileRef);
       
-      // 2. DB에 데이터 저장 (순수 입력 태그만 저장)
+      // 2. DB에 데이터 저장
       await addDoc(collection(db, 'photos'), {
         url, 
         desc, 
@@ -38,12 +39,13 @@ export default function UploadTab({ setActiveTab, showToast, userData, setLoadin
         viewCount: 0
       });
       
-      // 3. 카운트 증가
+      // 3. 유저 활동 카운트 증가
       await updateDoc(doc(db, 'users', auth.currentUser.uid), { uploadCount: increment(1) });
       
       setLoading(false);
       if(showToast) showToast('게시 완료! (+100점)');
-      setActiveTab('home');
+      // 업로드 후 홈으로 이동 (애니메이션 적용된 함수 사용)
+      setActiveTab('home'); 
     } catch (e) {
       setLoading(false);
       alert(e.message);
